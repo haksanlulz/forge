@@ -4,8 +4,21 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
+import java.nio.file.LinkOption;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.nio.file.attribute.BasicFileAttributes;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 import java.util.zip.ZipOutputStream;
@@ -46,6 +59,115 @@ public class ZipUtil {
                     zipOut.closeEntry();
                 }
             }
+        }
+    }
+
+    /**
+     * Write several directory trees into one archive, each under its own top-level prefix,
+     * plus any number of generated text entries.
+     * <p>
+     * {@code roots} maps an entry prefix (forward slashes, e.g. {@code custom/cards}) to the
+     * directory whose contents go under it; a root that is not a directory is skipped silently,
+     * same contract as {@link #zipFiles}. What each root contributes is exactly
+     * {@link #packedFiles}, with {@code exclude} left out. {@code textEntries} maps an entry name
+     * to its UTF-8 content. The archive is written to {@code dest + ".part"} and moved into place
+     * only once it is complete, so a failure never leaves a truncated zip at {@code dest}.
+     */
+    public static void zipRoots(File dest, Map<String, File> roots, Map<String, String> textEntries, Collection<File> exclude) throws IOException {
+        final File part = new File(dest.getPath() + ".part");
+        // never pack the archive into itself: a destination under one of the roots would otherwise have
+        // the growing .part streamed into its own entry until the disk was full
+        final Set<File> skip = new HashSet<>(exclude);
+        skip.add(part);
+        skip.add(dest);
+        try {
+            try (FileOutputStream fos = new FileOutputStream(part);
+                 ZipOutputStream zipOut = new ZipOutputStream(fos)) {
+                final byte[] buffer = new byte[8192];
+                for (Map.Entry<String, File> root : roots.entrySet()) {
+                    final File dir = root.getValue();
+                    for (File file : packedFiles(dir, skip)) {
+                        final String relative = dir.toPath().relativize(file.toPath()).toString().replace(File.separatorChar, '/');
+                        zipOut.putNextEntry(new ZipEntry(root.getKey() + "/" + relative));
+                        try (FileInputStream fis = new FileInputStream(file)) {
+                            int length;
+                            while ((length = fis.read(buffer)) >= 0) {
+                                zipOut.write(buffer, 0, length);
+                            }
+                        }
+                        zipOut.closeEntry();
+                    }
+                }
+                if (textEntries != null) {
+                    for (Map.Entry<String, String> text : textEntries.entrySet()) {
+                        zipOut.putNextEntry(new ZipEntry(text.getKey()));
+                        zipOut.write(text.getValue().getBytes(StandardCharsets.UTF_8));
+                        zipOut.closeEntry();
+                    }
+                }
+            }
+            try {
+                Files.move(part.toPath(), dest.toPath(), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+            } catch (AtomicMoveNotSupportedException ex) {
+                Files.move(part.toPath(), dest.toPath(), StandardCopyOption.REPLACE_EXISTING);
+            }
+        } catch (IOException | RuntimeException | Error ex) { // an OutOfMemoryError over a large picture folder must not leave the .part behind either
+            Files.deleteIfExists(part.toPath());
+            throw ex;
+        }
+    }
+
+    /**
+     * The regular files {@link #zipRoots} packs from one root, in a stable order; empty for a root
+     * that is not a directory. Left out: a hidden or dot-named file or folder ({@code File.isHidden}
+     * is only the DOS attribute on Windows, and the card reader skips dot-folders), a symbolic link
+     * or Windows junction (it would pack files from outside the root, or loop), and every file or
+     * folder in {@code exclude}.
+     */
+    public static List<File> packedFiles(File root, Collection<File> exclude) throws IOException {
+        final List<File> out = new ArrayList<>();
+        if (root == null || !root.isDirectory()) {
+            return out;
+        }
+        final Set<File> skip = new HashSet<>();
+        for (File f : exclude) {
+            skip.add(f.getCanonicalFile());
+        }
+        collectPacked(root, skip, out);
+        return out;
+    }
+
+    private static void collectPacked(File dir, Set<File> skip, List<File> out) throws IOException {
+        final File[] children = dir.listFiles();
+        if (children == null) {
+            return;
+        }
+        Arrays.sort(children);
+        for (File child : children) {
+            if (child.isHidden() || child.getName().startsWith(".") || isLink(child) || skip.contains(child.getCanonicalFile())) {
+                continue;
+            }
+            if (child.isDirectory()) {
+                collectPacked(child, skip, out);
+            } else if (child.isFile()) {
+                out.add(child);
+            }
+        }
+    }
+
+    /** True for a symbolic link or a Windows junction, and for an entry whose attributes cannot be read. */
+    private static boolean isLink(File f) {
+        try {
+            final Path p = f.toPath();
+            final BasicFileAttributes attrs = Files.readAttributes(p, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+            if (attrs.isSymbolicLink()) {
+                return true;
+            }
+            // a junction reads as "other" (a reparse point), and so does a cloud-storage placeholder file;
+            // only the junction resolves to somewhere else (File.getCanonicalPath does not resolve it)
+            return attrs.isOther() && !p.toRealPath().equals(p.getParent().toRealPath().resolve(p.getFileName()));
+        } catch (IOException | InvalidPathException ex) {
+            return true;
         }
     }
 
