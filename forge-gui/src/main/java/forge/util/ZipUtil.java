@@ -4,8 +4,14 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
+import java.util.Collections;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 import java.util.zip.ZipOutputStream;
@@ -49,8 +55,60 @@ public class ZipUtil {
         }
     }
 
+    /**
+     * Write several directory trees into one archive, each under its own top-level prefix,
+     * plus any number of generated text entries.
+     * <p>
+     * {@code roots} maps an entry prefix (forward slashes, e.g. {@code custom/cards}) to the
+     * directory whose contents go under it; a root that is not a directory is skipped silently,
+     * same contract as {@link #zipFiles}. {@code textEntries} maps an entry name to its UTF-8
+     * content. The archive is written to {@code dest + ".part"} and moved into place only once
+     * it is complete, so a failure never leaves a truncated zip at {@code dest}.
+     */
+    public static void zipRoots(File dest, Map<String, File> roots, Map<String, String> textEntries) throws IOException {
+        isClassic = false;
+        final File part = new File(dest.getPath() + ".part");
+        // never pack the archive into itself: a destination under one of the roots would otherwise have
+        // the growing .part streamed into its own entry until the disk was full
+        final Set<File> skip = Set.of(part.getCanonicalFile(), dest.getCanonicalFile());
+        try {
+            try (FileOutputStream fos = new FileOutputStream(part);
+                 ZipOutputStream zipOut = new ZipOutputStream(fos)) {
+                for (Map.Entry<String, File> root : roots.entrySet()) {
+                    final File dir = root.getValue();
+                    if (dir == null || !dir.isDirectory()) {
+                        continue;
+                    }
+                    zipFile(dir, root.getKey(), zipOut, skip);
+                }
+                if (textEntries != null) {
+                    for (Map.Entry<String, String> text : textEntries.entrySet()) {
+                        zipOut.putNextEntry(new ZipEntry(text.getKey()));
+                        zipOut.write(text.getValue().getBytes(StandardCharsets.UTF_8));
+                        zipOut.closeEntry();
+                    }
+                }
+            }
+            try {
+                Files.move(part.toPath(), dest.toPath(), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+            } catch (AtomicMoveNotSupportedException ex) {
+                Files.move(part.toPath(), dest.toPath(), StandardCopyOption.REPLACE_EXISTING);
+            }
+        } catch (IOException | RuntimeException | Error ex) { // an OutOfMemoryError over a large picture folder must not leave the .part behind either
+            Files.deleteIfExists(part.toPath());
+            throw ex;
+        }
+    }
+
     private static void zipFile(File fileToZip, String fileName, ZipOutputStream zipOut) throws IOException {
+        zipFile(fileToZip, fileName, zipOut, Collections.emptySet());
+    }
+
+    private static void zipFile(File fileToZip, String fileName, ZipOutputStream zipOut, Set<File> skip) throws IOException {
         if (fileToZip.isHidden()) {
+            return;
+        }
+        if (!skip.isEmpty() && fileToZip.isFile() && skip.contains(fileToZip.getCanonicalFile())) {
             return;
         }
         //skip loose files like forge.log, etc
@@ -70,7 +128,7 @@ public class ZipUtil {
             File[] children = fileToZip.listFiles();
             if (children != null) {
                 for (File childFile : children) {
-                    zipFile(childFile, fileName + "/" + childFile.getName(), zipOut);
+                    zipFile(childFile, fileName + "/" + childFile.getName(), zipOut, skip);
                 }
             }
             return;
