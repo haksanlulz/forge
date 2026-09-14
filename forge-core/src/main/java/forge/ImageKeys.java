@@ -97,6 +97,27 @@ public final class ImageKeys {
     public static void clearMissingCards() {
         missingCards.clear();
     }
+    /**
+     * Forget everything cached about one card image so the next lookup hits the disk again:
+     * the resolved file, the negative result, any in-flight set lookup, and the per-edition
+     * "does this set folder have any images" answer that {@link #hasImage(PaperCard)} relies on.
+     *
+     * @param key     the relative image key ({@code SET/Name.full}) as returned by {@code PaperCard.getCardImageKey()}
+     * @param edition the edition code of that printing
+     */
+    public static void forgetCardImage(String key, String edition) {
+        if (key != null) {
+            cachedCards.remove(key);
+            missingCards.remove(key);
+            toFind.remove(key);
+        }
+        if (edition != null) {
+            editionImageLookup.remove(edition);
+            if (CACHE_CARD_PICS_SUBDIR != null) {
+                cachedContent.remove(getSetFolder(edition));
+            }
+        }
+    }
     public static File getCachedCardsFile(String key) {
         return cachedCards.get(key);
     }

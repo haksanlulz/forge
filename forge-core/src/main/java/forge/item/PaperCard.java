@@ -221,6 +221,17 @@ public class PaperCard implements Comparable<IPaperCard>, InventoryItemFromSet, 
         return hasImage;
     }
 
+    /**
+     * Drops the cached image keys and the hasImage flag. The keys embed the face names (the back
+     * face's for the alt key, both halves' for a split card), so they must be rebuilt after the
+     * rules behind this printing were re-read in place - a Workshop save can rename a face.
+     */
+    public void resetImageKeys() {
+        cardImageKey = null;
+        cardAltImageKey = null;
+        hasImage = null;
+    }
+
     public PaperCard(final CardRules rules0, final String edition0, final CardRarity rarity0) {
         this(rules0, edition0, rarity0, IPaperCard.DEFAULT_ART_INDEX, false,
                 IPaperCard.NO_COLLECTOR_NUMBER, IPaperCard.NO_ARTIST_NAME, IPaperCard.NO_FUNCTIONAL_VARIANT);

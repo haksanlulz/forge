@@ -93,9 +93,14 @@ public final class CardRules implements ICardCharacteristics {
         allFaces = newRules.allFaces;
         aiHints = newRules.aiHints;
         colorIdentity = newRules.colorIdentity;
+        deckbuildingColors = null; // lazily derived from the faces: rebuild on next use
         meldWith = newRules.meldWith;
         partnerWith = newRules.partnerWith;
+        partnerType = newRules.partnerType;
         setColorID = newRules.setColorID;
+        deltaHand = newRules.deltaHand;
+        deltaLife = newRules.deltaLife;
+        supportedFunctionalVariants = newRules.supportedFunctionalVariants;
         tokens = newRules.tokens;
         // where the script now lives and whether it is a user file: a Workshop save turns a stock
         // card into a custom override (and a revert turns it back), and every consumer of isCustom()
