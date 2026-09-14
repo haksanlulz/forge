@@ -5,12 +5,17 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.InvalidPathException;
+import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
+import java.util.Collection;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.TreeSet;
 import java.util.regex.Matcher;
+import java.util.stream.Stream;
 
 import javax.imageio.ImageIO;
 
@@ -18,6 +23,7 @@ import forge.card.CardEdition;
 import forge.card.CardRarity;
 import forge.util.FileSection;
 import forge.util.FileUtil;
+import forge.util.ZipUtil;
 
 /**
  * The file-system half of the Workshop's custom-card features. Pure IO over plain paths: no Swing,
@@ -287,5 +293,182 @@ public final class WorkshopFiles {
             }
         }
         return dest;
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Export Set
+
+    /** Entry prefix (forward slashes) each root is packed under. */
+    public static final String EXPORT_CARDS = "custom/cards";
+    public static final String EXPORT_EDITIONS = "custom/editions";
+    public static final String EXPORT_TOKENS = "custom/tokens";
+    public static final String EXPORT_PICS = "Cache/pics/cards";
+    public static final String README_NAME = "README.txt";
+
+    /**
+     * The directories an exported set is made of, keyed by the prefix they are packed under.
+     *
+     * @param customDir  the user's {@code custom/} dir (holding cards/, editions/, tokens/)
+     * @param picsRoot   the card picture cache root
+     * @param setFolders the picture sub-folders to include - one per custom edition (plus USER)
+     */
+    public static LinkedHashMap<String, File> exportRoots(final File customDir, final File picsRoot, final Collection<String> setFolders) {
+        final LinkedHashMap<String, File> roots = new LinkedHashMap<>();
+        roots.put(EXPORT_CARDS, new File(customDir, "cards"));
+        roots.put(EXPORT_EDITIONS, new File(customDir, "editions"));
+        roots.put(EXPORT_TOKENS, new File(customDir, "tokens"));
+        for (final String folder : new TreeSet<>(setFolders)) {
+            if (folder == null || folder.isEmpty()) {
+                continue;
+            }
+            roots.put(EXPORT_PICS + "/" + folder, new File(picsRoot, folder));
+        }
+        return roots;
+    }
+
+    /** True when at least one root is a directory holding a regular file the archive would carry somewhere beneath it. */
+    public static boolean hasAnythingToExport(final Map<String, File> roots) {
+        for (final File root : roots.values()) {
+            if (root == null || !root.isDirectory()) {
+                continue;
+            }
+            try (Stream<Path> walk = Files.walk(root.toPath())) {
+                if (walk.anyMatch(p -> Files.isRegularFile(p) && isVisibleUnder(root.toPath(), p))) {
+                    return true;
+                }
+            } catch (final IOException ex) {
+                // unreadable root: nothing exportable in it
+            }
+        }
+        return false;
+    }
+
+    /**
+     * The packed root a destination sits inside, or null. An archive written under one of its own
+     * roots would be walked into itself: {@link ZipUtil#zipRoots} streams every file under the root,
+     * the growing {@code .part} included, and the read chases the write until the disk is full.
+     */
+    public static File rootContaining(final File dest, final Map<String, File> roots) throws IOException {
+        final String destPath = dest.getCanonicalPath();
+        for (final File root : roots.values()) {
+            if (root != null && root.isDirectory() && destPath.startsWith(root.getCanonicalPath() + File.separator)) {
+                return root;
+            }
+        }
+        return null;
+    }
+
+    /** What went into an export, per root. */
+    public static final class ExportReport {
+        public final Map<String, Integer> filesPerRoot = new LinkedHashMap<>();
+
+        public int totalFiles() {
+            int n = 0;
+            for (final int c : filesPerRoot.values()) {
+                n += c;
+            }
+            return n;
+        }
+
+        @Override
+        public String toString() {
+            final StringBuilder sb = new StringBuilder();
+            for (final Map.Entry<String, Integer> e : filesPerRoot.entrySet()) {
+                if (e.getValue() > 0) {
+                    sb.append(e.getKey()).append(": ").append(e.getValue()).append('\n');
+                }
+            }
+            return sb.toString().trim();
+        }
+    }
+
+    /**
+     * Packs the roots (see {@link #exportRoots}) and an install README into {@code destZip}.
+     * Goes through {@link ZipUtil#zipRoots}, so a failure never leaves a truncated archive behind,
+     * and refuses a destination inside one of the roots (see {@link #rootContaining}).
+     */
+    public static ExportReport exportPack(final File destZip, final Map<String, File> roots) throws IOException {
+        final File inside = rootContaining(destZip, roots);
+        if (inside != null) {
+            throw new IOException("the archive cannot be written inside a folder it packs: " + inside);
+        }
+        final ExportReport report = new ExportReport();
+        for (final Map.Entry<String, File> root : roots.entrySet()) {
+            report.filesPerRoot.put(root.getKey(), countFiles(root.getValue()));
+        }
+        ZipUtil.zipRoots(destZip, roots, Map.of(README_NAME, readme()));
+        return report;
+    }
+
+    private static int countFiles(final File root) {
+        if (root == null || !root.isDirectory()) {
+            return 0;
+        }
+        try (Stream<Path> walk = Files.walk(root.toPath())) {
+            return (int) walk.filter(p -> Files.isRegularFile(p) && isVisibleUnder(root.toPath(), p)).count();
+        } catch (final IOException ex) {
+            return 0;
+        }
+    }
+
+    /**
+     * True when neither the path nor any directory between it and the root is hidden: ZipUtil.zipFile
+     * returns at a hidden DIRECTORY before descending, so a file under custom/cards/.git is not in the
+     * archive and must not be counted or count as something to export.
+     */
+    private static boolean isVisibleUnder(final Path root, final Path p) {
+        for (Path q = p; q != null && !q.equals(root); q = q.getParent()) {
+            if (q.toFile().isHidden()) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Plain English on purpose (not a Localizer key): it ships inside the pack to other players,
+     * whose Forge language is unknown.
+     */
+    public static String readme() {
+        return String.join("\n",
+                "Forge custom card set",
+                "=====================",
+                "",
+                "This archive was exported from Forge's Workshop. It holds custom card scripts,",
+                "custom edition files and card pictures. Every player in a network game needs",
+                "this same pack installed, or the custom cards will not load on their side.",
+                "",
+                "Contents",
+                "--------",
+                "  custom/cards/        card scripts      -> your Forge user dir, custom/cards/",
+                "  custom/editions/     edition files     -> your Forge user dir, custom/editions/",
+                "  custom/tokens/       token scripts     -> your Forge user dir, custom/tokens/",
+                "  Cache/pics/cards/    card pictures     -> your Forge card picture dir",
+                "  README.txt           this file",
+                "",
+                "Where to put it",
+                "---------------",
+                "Copy the contents of custom/ into the Forge user directory, and copy the",
+                "CONTENTS of Cache/pics/cards/ (the set folders inside it) into the card",
+                "picture directory. The default locations are:",
+                "",
+                "  Windows   user dir:  %APPDATA%\\Forge\\custom\\",
+                "            pictures:  %LOCALAPPDATA%\\Forge\\Cache\\pics\\cards\\",
+                "  macOS     user dir:  ~/Library/Application Support/Forge/custom/",
+                "            pictures:  ~/Library/Caches/Forge/pics/cards/",
+                "  Linux     user dir:  ~/.forge/custom/",
+                "            pictures:  ~/.cache/forge/pics/cards/",
+                "",
+                "The \"Cache\" folder name in this archive is only where Windows keeps the picture",
+                "cache; on macOS and Linux the set folders go straight under pics/cards/.",
+                "If forge.profile.properties sets cardPicsDir, use that directory instead.",
+                "",
+                "Restart Forge after copying. Custom cards appear in the deck editor and the",
+                "Workshop; set-less custom cards are filed under the USER edition.",
+                "",
+                "Not included: art for printings that belong to a stock (non-custom) set, such",
+                "as a custom override of a stock card. That art lives in the stock set's folder",
+                "next to downloaded pictures and is left for each player to supply.",
+                "");
     }
 }

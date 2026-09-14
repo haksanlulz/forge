@@ -219,11 +219,17 @@ public enum CCardScript implements ICDoc {
      * card database is shared with every connected player, the same guard the developer-mode
      * checkbox applies) or a local one (every live Card reads the CardRules object that a save
      * reinitializes in place, so a card the game builds later - a copy, a cascade, a wish - would be
-     * built from the new text while the ones already in play keep the old abilities).
+     * built from the new text while the ones already in play keep the old abilities), and while an
+     * Export Set... is writing its archive (the walk over custom/cards and the picture folders runs on
+     * a background thread: a file written now is packed torn, pre-edit or not at all).
      */
     public static boolean refuseIfNetworkMatchActive() {
         if (FServerManager.getInstance().isMatchActive() || !Singletons.getControl().getCurrentMatches().isEmpty()) {
             FOptionPane.showErrorDialog(msg("lblWorkshopSaveRefusedNetworkMatch"));
+            return true;
+        }
+        if (CCardDesigner.SINGLETON_INSTANCE.isExporting()) {
+            FOptionPane.showErrorDialog(msg("lblWorkshopRefusedExporting"));
             return true;
         }
         return false;

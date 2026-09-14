@@ -35,6 +35,7 @@ public enum VCardDesigner implements IVDoc<CCardDesigner> {
     private final FLabel btnSetBackArt = button("lblWorkshopSetBackArt", FSkinProp.ICO_OPEN);
     private final FLabel btnRevert = button("lblWorkshopRevertToStock", FSkinProp.ICO_EDIT);
     private final FLabel btnDelete = button("lblWorkshopDeleteCustomCard", FSkinProp.ICO_DELETE);
+    private final FLabel btnExportSet = button("lblWorkshopExportSet", FSkinProp.ICO_SAVEAS);
 
     private final FLabel btnSaveCard = new FLabel.Builder()
             .opaque(true).hoverable(true)
@@ -96,6 +97,10 @@ public enum VCardDesigner implements IVDoc<CCardDesigner> {
         return btnDelete;
     }
 
+    public FLabel getBtnExportSet() {
+        return btnExportSet;
+    }
+
     //========== Overridden methods
 
     /* (non-Javadoc)
@@ -152,6 +157,7 @@ public enum VCardDesigner implements IVDoc<CCardDesigner> {
         body.add(btnSetBackArt, "growx, h 30!");
         body.add(btnRevert, "growx, h 30!");
         body.add(btnDelete, "growx, h 30!");
+        body.add(btnExportSet, "growx, h 30!");
         body.add(btnSaveCard, "growx, h 30!, pushy, aligny bottom");
     }
 }

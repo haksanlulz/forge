@@ -1,8 +1,12 @@
 package forge.screens.workshop.controllers;
 
+import java.awt.Cursor;
 import java.io.File;
 import java.io.IOException;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.TreeSet;
 
 import javax.swing.JFileChooser;
 import javax.swing.JOptionPane;
@@ -12,10 +16,14 @@ import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.exception.ExceptionUtils;
 
 import forge.ImageCache;
+import forge.ImageKeys;
 import forge.card.CardDb;
 import forge.card.CardEdition;
 import forge.card.CardRules;
 import forge.card.CardSplitType;
+import forge.gui.FThreads;
+import forge.gui.GuiBase;
+import forge.gui.MouseUtil;
 import forge.gui.card.CardScriptInfo;
 import forge.gui.card.CardScriptInfo.Source;
 import forge.gui.card.CardScriptProbe;
@@ -30,6 +38,7 @@ import forge.screens.workshop.WorkshopFiles;
 import forge.screens.workshop.menus.WorkshopFileMenu;
 import forge.screens.workshop.views.VCardDesigner;
 import forge.screens.workshop.views.VWorkshopCatalog;
+import forge.toolbox.FLabel;
 import forge.toolbox.FOptionPane;
 import forge.util.ItemPool;
 import forge.util.Localizer;
@@ -48,6 +57,7 @@ public enum CCardDesigner implements ICDoc {
     private String artNote;
     /** The printing {@link #artNote} was written for: the note belongs to that card's status line only. */
     private PaperCard artNoteCard;
+    private boolean exporting;
 
     CCardDesigner() {
         final VCardDesigner view = VCardDesigner.SINGLETON_INSTANCE;
@@ -58,10 +68,16 @@ public enum CCardDesigner implements ICDoc {
         view.getBtnSetBackArt().setCommand((Runnable) () -> setArt(true));
         view.getBtnRevert().setCommand((Runnable) this::revertToStock);
         view.getBtnDelete().setCommand((Runnable) this::deleteCustomCard);
+        view.getBtnExportSet().setCommand((Runnable) this::exportSet);
     }
 
     private static String msg(final String key, final Object... args) {
         return Localizer.getInstance().getMessage(key, args);
+    }
+
+    /** True while an Export Set... is writing the archive on the background thread; every card and art change is refused meanwhile. */
+    public boolean isExporting() {
+        return exporting;
     }
 
     private static String rootMessage(final Throwable ex) {
@@ -303,8 +319,8 @@ public enum CCardDesigner implements ICDoc {
 
     /** Copies a picked image into the picture cache under this printing's image key and repaints. */
     public void setArt(final boolean backFace) {
-        if (script().getCurrentCard() == null || !script().canSwitchAway(false)) {
-            return;
+        if (script().getCurrentCard() == null || !script().canSwitchAway(false) || CCardScript.refuseIfNetworkMatchActive()) {
+            return; //gated like the other buttons: an export in progress would pack the picture torn or not at all
         }
         final PaperCard pc = script().getCurrentCard(); //read after the gate: its Save option can rename the current card
         if (pc == null || !allowsSetArt(pc, script().getCurrentScriptInfo())) {
@@ -583,6 +599,79 @@ public enum CCardDesigner implements ICDoc {
         } catch (final Exception ex) {
             System.err.println("Workshop: could not restore the stock " + name + " after removing the custom card: " + ex);
         }
+    }
+
+    /** The picture sub-folders of every custom edition (custom/editions/*.txt plus the synthetic USER bucket). */
+    private static Set<String> customSetFolders() {
+        final Set<String> folders = new TreeSet<>();
+        for (final CardEdition edition : FModel.getMagicDb().getEditions()) {
+            if (edition.getType() == CardEdition.Type.CUSTOM_SET) {
+                final String folder = ImageKeys.getSetFolder(edition.getCode());
+                folders.add(StringUtils.isBlank(folder) ? edition.getCode() : folder);
+            }
+        }
+        return folders;
+    }
+
+    /**
+     * Zips custom/cards, custom/editions, custom/tokens and the picture folders of every custom
+     * edition (plus USER) into one archive with an install README. The zip is written off the
+     * EDT under a wait cursor; every UI mutation is back on the EDT.
+     */
+    public void exportSet() {
+        if (exporting || !script().canSwitchAway(false)) {
+            return; //one export at a time (the File menu is not disabled with the button); an unsaved edit would not be in the pack
+        }
+        final Map<String, File> roots = WorkshopFiles.exportRoots(new File(ForgeConstants.USER_CUSTOM_DIR),
+                new File(ForgeConstants.CACHE_CARD_PICS_DIR), customSetFolders());
+        if (!WorkshopFiles.hasAnythingToExport(roots)) {
+            FOptionPane.showMessageDialog(msg("lblWorkshopExportEmpty"), msg("lblWorkshopExportSet"));
+            return;
+        }
+        final File dest = GuiBase.getInterface().getSaveFile(new File(System.getProperty("user.home"), "forge-custom-set.zip"));
+        if (dest == null) {
+            return;
+        }
+        try {
+            final File inside = WorkshopFiles.rootContaining(dest, roots);
+            if (inside != null) {
+                //the archive would be walked into itself: zipRoots streams every file under the root, the growing .part included
+                FOptionPane.showErrorDialog(msg("lblWorkshopExportInsideRoot", inside.getPath()), msg("lblWorkshopExportSet"));
+                return;
+            }
+        } catch (final IOException ex) {
+            FOptionPane.showErrorDialog(msg("lblWorkshopExportFailed", rootMessage(ex)), msg("lblWorkshopExportSet"));
+            return;
+        }
+        if (dest.exists() && !FOptionPane.showConfirmDialog(msg("lblWorkshopExportOverwrite", dest.getPath()), msg("lblWorkshopExportSet"), false)) {
+            return;
+        }
+
+        final FLabel btnExport = VCardDesigner.SINGLETON_INSTANCE.getBtnExportSet();
+        exporting = true;
+        btnExport.setEnabled(false);
+        MouseUtil.setCursor(Cursor.WAIT_CURSOR);
+        FThreads.invokeInBackgroundThread(() -> {
+            WorkshopFiles.ExportReport report = null;
+            Throwable failure = null;
+            try {
+                report = WorkshopFiles.exportPack(dest, roots);
+            } catch (final Throwable ex) { //an Error (OutOfMemoryError over a big picture folder) would otherwise strand the wait cursor for the session
+                failure = ex;
+            }
+            final WorkshopFiles.ExportReport doneReport = report;
+            final Throwable doneFailure = failure;
+            FThreads.invokeInEdtLater(() -> {
+                exporting = false;
+                MouseUtil.resetCursor();
+                btnExport.setEnabled(true);
+                if (doneFailure != null) {
+                    FOptionPane.showErrorDialog(msg("lblWorkshopExportFailed", rootMessage(doneFailure)), msg("lblWorkshopExportSet"));
+                } else {
+                    FOptionPane.showMessageDialog(msg("lblWorkshopExportDone", dest.getPath(), String.valueOf(doneReport)), msg("lblWorkshopExportSet"));
+                }
+            });
+        });
     }
 
     //========== Overridden methods

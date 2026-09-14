@@ -8,8 +8,15 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.text.SimpleDateFormat;
 import java.util.Comparator;
+import java.util.Enumeration;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.TreeSet;
 import java.util.stream.Stream;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipFile;
 
 import javax.imageio.ImageIO;
 
@@ -245,5 +252,160 @@ public class WorkshopFilesTest {
         Assert.assertThrows(IOException.class, () -> WorkshopFiles.appendArtVariant(file, "Bear @ Large", CardRarity.Common));
         Assert.assertThrows(IOException.class, () -> WorkshopFiles.appendArtVariant(file, "Cash $$$", CardRarity.Common));
         Assert.assertFalse(file.exists(), "a refused name writes nothing");
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Export Set
+
+    private Path customDir;
+    private Path picsRoot;
+
+    /** custom/cards/g/goblin_proxy.txt, custom/editions/PRX.txt, pics USER/ + PRX/ each with one image. */
+    private Map<String, File> populatedRoots() throws IOException {
+        customDir = tmp.resolve("custom");
+        picsRoot = tmp.resolve("pics");
+        Files.createDirectories(customDir.resolve("cards/g"));
+        Files.createDirectories(customDir.resolve("editions"));
+        Files.writeString(customDir.resolve("cards/g/goblin_proxy.txt"), "Name:Goblin Proxy\nManaCost:R\nTypes:Creature Goblin\nPT:1/1\nOracle:\n");
+        Files.writeString(customDir.resolve("editions/PRX.txt"), "[metadata]\nCode=PRX\nName=Pod Proxies\n[cards]\n1 C Goblin Proxy\n");
+        writeImage(Files.createDirectories(picsRoot.resolve("USER")), "My Card.full.jpg", "jpg");
+        writeImage(Files.createDirectories(picsRoot.resolve("PRX")), "Goblin Proxy.full.png", "png");
+        writeImage(Files.createDirectories(picsRoot.resolve("LEA")), "Grizzly Bears.full.jpg", "jpg"); // stock set: must NOT be packed
+        Files.writeString(hiddenDir(customDir.resolve("cards"), ".git").resolve("HEAD"), "ref: refs/heads/main\n"); // ZipUtil prunes a hidden folder
+        return WorkshopFiles.exportRoots(customDir.toFile(), picsRoot.toFile(), List.of("USER", "PRX"));
+    }
+
+    /** A dot-folder, marked hidden on Windows too, so File.isHidden() sees it the way ZipUtil.zipFile does on every platform. */
+    private static Path hiddenDir(final Path parent, final String name) throws IOException {
+        final Path dir = Files.createDirectories(parent.resolve(name));
+        try {
+            Files.setAttribute(dir, "dos:hidden", true);
+        } catch (UnsupportedOperationException | IllegalArgumentException ignored) {
+            // not a DOS file system: the leading dot already hides it
+        }
+        return dir;
+    }
+
+    private static Set<String> entryNames(final File zip) throws IOException {
+        final Set<String> names = new TreeSet<>();
+        try (ZipFile zf = new ZipFile(zip)) {
+            final Enumeration<? extends ZipEntry> en = zf.entries();
+            while (en.hasMoreElements()) {
+                names.add(en.nextElement().getName());
+            }
+        }
+        return names;
+    }
+
+    /** The pack layout other players install from: prefixed forward-slash entries, the README, no stock-set art. */
+    @Test
+    public void exportPackWritesPrefixedEntriesAndAReadme() throws IOException {
+        final Map<String, File> roots = populatedRoots();
+        final File zip = tmp.resolve("out/set.zip").toFile();
+        Files.createDirectories(zip.getParentFile().toPath());
+
+        final WorkshopFiles.ExportReport report = WorkshopFiles.exportPack(zip, roots);
+
+        Assert.assertTrue(zip.isFile(), "zip not written");
+        Assert.assertFalse(new File(zip.getPath() + ".part").exists(), ".part must be moved into place");
+        final Set<String> names = entryNames(zip);
+        Assert.assertTrue(names.contains("custom/cards/g/goblin_proxy.txt"), names.toString());
+        Assert.assertTrue(names.contains("custom/editions/PRX.txt"), names.toString());
+        Assert.assertTrue(names.contains("Cache/pics/cards/USER/My Card.full.jpg"), names.toString());
+        Assert.assertTrue(names.contains("Cache/pics/cards/PRX/Goblin Proxy.full.png"), names.toString());
+        Assert.assertTrue(names.contains(WorkshopFiles.README_NAME), names.toString());
+        Assert.assertTrue(names.stream().noneMatch(n -> n.contains("LEA")), "stock-set art must not be packed: " + names);
+        Assert.assertTrue(names.stream().noneMatch(n -> n.contains("\\")), "entry names must use forward slashes: " + names);
+        Assert.assertTrue(names.stream().noneMatch(n -> n.contains(".git")), "a hidden folder is pruned by ZipUtil: " + names);
+        Assert.assertEquals(report.filesPerRoot.get("custom/cards").intValue(), 1, "the file under the hidden folder is not in the archive, so it is not counted");
+        Assert.assertEquals(report.filesPerRoot.get("custom/tokens").intValue(), 0);
+        Assert.assertEquals(report.totalFiles(), 4);
+
+        try (ZipFile zf = new ZipFile(zip)) {
+            final String readme = new String(zf.getInputStream(zf.getEntry(WorkshopFiles.README_NAME)).readAllBytes(), StandardCharsets.UTF_8);
+            Assert.assertTrue(readme.contains("%APPDATA%\\Forge\\custom\\"), readme);
+            Assert.assertTrue(readme.contains("~/.forge/custom/"), readme);
+        }
+    }
+
+    @Test
+    public void exportPackReplacesAnExistingZip() throws IOException {
+        final Map<String, File> roots = populatedRoots();
+        final File zip = tmp.resolve("set.zip").toFile();
+        Files.writeString(zip.toPath(), "stale");
+        WorkshopFiles.exportPack(zip, roots);
+        Assert.assertTrue(entryNames(zip).contains(WorkshopFiles.README_NAME));
+    }
+
+    /** ZipUtil.zipFile returns at a hidden DIRECTORY before descending, so what sits under one is not "something to export". */
+    @Test
+    public void exportSeesNothingUnderAHiddenFolder() throws IOException {
+        customDir = tmp.resolve("custom");
+        picsRoot = tmp.resolve("pics");
+        Files.writeString(hiddenDir(Files.createDirectories(customDir.resolve("cards")), ".git").resolve("HEAD"), "ref: refs/heads/main\n");
+        final Map<String, File> roots = WorkshopFiles.exportRoots(customDir.toFile(), picsRoot.toFile(), List.of());
+        Assert.assertFalse(WorkshopFiles.hasAnythingToExport(roots), "a root holding files only under a hidden folder has nothing the archive would carry");
+        Files.writeString(customDir.resolve("cards/visible.txt"), "Name:Visible\n");
+        Assert.assertTrue(WorkshopFiles.hasAnythingToExport(roots));
+    }
+
+    /** A failure mid-write must throw AND leave neither a truncated zip nor a .part behind. */
+    @Test
+    public void exportPackFailureLeavesNoPartFile() throws IOException {
+        final Map<String, File> roots = populatedRoots();
+        // dest sits inside a path that is a FILE, so neither the .part nor the move can succeed
+        final File blocker = tmp.resolve("blocker").toFile();
+        Files.writeString(blocker.toPath(), "I am a file, not a directory");
+        final File dest = new File(blocker, "set.zip");
+        try {
+            WorkshopFiles.exportPack(dest, roots);
+            Assert.fail("expected the export to fail");
+        } catch (IOException expected) {
+            // fine
+        }
+        Assert.assertFalse(dest.exists());
+        Assert.assertFalse(new File(dest.getPath() + ".part").exists());
+    }
+
+    /**
+     * Same, with the failure arriving mid-stream after entries have already been written: two roots
+     * that emit the same entry name make ZipOutputStream throw "duplicate entry" part-way through.
+     */
+    @Test
+    public void exportPackFailureMidStreamLeavesNoPartFile() throws IOException {
+        final Map<String, File> roots = populatedRoots();
+        final File dest = tmp.resolve("set.zip").toFile();
+        final Map<String, File> dup = new LinkedHashMap<>(roots);
+        dup.put("custom/cards/g", customDir.resolve("cards/g").toFile()); // custom/cards/g/goblin_proxy.txt a second time
+        boolean failed = false;
+        try {
+            WorkshopFiles.exportPack(dest, dup);
+        } catch (IOException expected) {
+            failed = true;
+        }
+        Assert.assertTrue(failed, "expected a duplicate-entry ZipException mid-stream");
+        Assert.assertFalse(dest.exists(), "a failed export must not leave a zip at dest");
+        Assert.assertFalse(new File(dest.getPath() + ".part").exists(), "a failed export must not leave a .part");
+    }
+
+    /**
+     * An archive written under one of its own roots is walked into itself (the growing .part is a
+     * file under that root), and the read chases the write until the disk is full. Refused up front,
+     * with nothing written.
+     */
+    @Test
+    public void exportPackRefusesADestinationInsideAPackedRoot() throws IOException {
+        final Map<String, File> roots = populatedRoots();
+        final File inside = picsRoot.resolve("USER/forge-custom-set.zip").toFile();
+        Assert.assertEquals(WorkshopFiles.rootContaining(inside, roots), picsRoot.resolve("USER").toFile());
+        Assert.assertNull(WorkshopFiles.rootContaining(tmp.resolve("elsewhere.zip").toFile(), roots));
+        try {
+            WorkshopFiles.exportPack(inside, roots);
+            Assert.fail("expected the export to refuse a destination inside a packed root");
+        } catch (IOException expected) {
+            // fine
+        }
+        Assert.assertFalse(inside.exists());
+        Assert.assertFalse(new File(inside.getPath() + ".part").exists());
     }
 }
