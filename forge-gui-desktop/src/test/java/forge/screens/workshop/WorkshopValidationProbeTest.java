@@ -23,6 +23,7 @@ import forge.StaticData;
 import forge.card.CardDb;
 import forge.card.CardRarity;
 import forge.card.CardRules;
+import forge.card.ICardFace;
 import forge.gamesimulationtests.util.CardDatabaseHelper;
 import forge.gui.GuiBase;
 import forge.gui.card.CardScriptInfo;
@@ -225,12 +226,14 @@ public class WorkshopValidationProbeTest {
         Assert.assertFalse(live.isCustom());
         Assert.assertEquals(live.getPath(), stockPath);
 
-        CardRules override = CardScriptProbe.parseRules(stockText.replace("PT:2/2", "PT:3/3"), stem);
+        CardRules override = CardScriptProbe.parseRules(stockText.replace("PT:2/2", "PT:3/3").replace("ManaCost:1 G", "ManaCost:1 R"), stem);
         override.setCustom();
         override.setPath("custom/cards/w/" + stem + ".txt");
         Assert.assertSame(common.getEditor().putCard(override), live, "same name reinitializes in place");
         Assert.assertTrue(live.isCustom(), "the live rules must read custom after a Workshop save, not only after a restart");
         Assert.assertEquals(live.getPath(), "custom/cards/w/" + stem + ".txt");
+        Assert.assertTrue(live.getDeckbuildingColors().hasRed() && !live.getDeckbuildingColors().hasGreen(),
+                "the lazily cached deckbuilding colors must be rebuilt from the new faces");
 
         CardRules reverted = CardScriptProbe.parseRules(stockText, stem);
         reverted.setPath(stockPath);
@@ -256,5 +259,144 @@ public class WorkshopValidationProbeTest {
         Assert.assertNotNull(common.getFaceByName(name), "putCard must index the face");
         Assert.assertEquals(pc.getEdition(), "USER", "a set-less custom card is filed under USER, as at load time");
         Assert.assertTrue(pc.getCardImageKey().startsWith("USER/"), pc.getCardImageKey());
+    }
+
+    /**
+     * A save that renames a DFC's back face takes the reinit path (front name unchanged). Every index
+     * keyed on the old back-face name must let go of it and take the new one, or New Card... accepts
+     * the new name as free while a deck naming the old one still loads.
+     */
+    @Test
+    public void editorReinitReindexesARenamedBackFace() {
+        final CardDb common = editorDb;
+        final String name = "Workshop Probe Front";
+        final String stem = "workshop_probe_front_workshop_probe_back";
+        final String script = "Name:" + name + "\nManaCost:U\nTypes:Creature Human\nPT:1/1\nAlternateMode:DoubleFaced\nOracle:\n\nALTERNATE\n\n"
+                + "Name:%BACK%\nManaCost:no cost\nColors:blue\nTypes:Creature Insect\nPT:3/2\nOracle:\n";
+
+        CardRules first = CardScriptProbe.parseRules(script.replace("%BACK%", "Workshop Probe Back"), stem);
+        first.setCustom();
+        common.getEditor().putCard(first);
+        Assert.assertTrue(common.contains("Workshop Probe Back"), "the back face is listed after the first put");
+        Assert.assertNotNull(common.getRules("Workshop Probe Back", true));
+
+        CardRules renamedBack = CardScriptProbe.parseRules(script.replace("%BACK%", "Workshop Probe Renamed Back"), stem);
+        renamedBack.setCustom();
+        Assert.assertSame(common.getEditor().putCard(renamedBack), first, "same front name reinitializes in place");
+        Assert.assertFalse(common.contains("Workshop Probe Back"), "the old back-face name must be gone from the printings index");
+        Assert.assertNull(common.getRules("Workshop Probe Back", true), "the old back-face name must be gone from the alt-name lookup");
+        Assert.assertNull(common.getFaceByName("Workshop Probe Back"));
+        Assert.assertTrue(common.contains("Workshop Probe Renamed Back"), "the new back-face name must list the printings");
+        Assert.assertSame(common.getRules("Workshop Probe Renamed Back", true), first);
+        Assert.assertNotNull(common.getFaceByName("Workshop Probe Renamed Back"));
+
+        common.getEditor().removeCard(first);
+        Assert.assertFalse(common.contains(name));
+        Assert.assertFalse(common.contains("Workshop Probe Renamed Back"));
+    }
+
+    /**
+     * The Workshop renames a card by registering the new one BEFORE it removes the original. For a
+     * double-faced card renamed on its front face only, the add path's putIfAbsent leaves the shared
+     * back face's alt-name entry pointing at the original and removeCard then drops it; reindexFaces
+     * is what points it at the renamed card again.
+     */
+    @Test
+    public void renamingAFrontFaceKeepsTheSharedBackFaceLookedUp() {
+        final CardDb common = editorDb;
+        final String script = "Name:%FRONT%\nManaCost:U\nTypes:Creature Human\nPT:1/1\nAlternateMode:DoubleFaced\nOracle:\n\nALTERNATE\n\n"
+                + "Name:Workshop Probe Shared Back\nManaCost:no cost\nColors:blue\nTypes:Creature Insect\nPT:3/2\nOracle:\n";
+        CardRules first = CardScriptProbe.parseRules(script.replace("%FRONT%", "Workshop Probe Old Front"), "workshop_probe_old_front_workshop_probe_shared_back");
+        first.setCustom();
+        common.getEditor().putCard(first);
+        CardRules renamed = CardScriptProbe.parseRules(script.replace("%FRONT%", "Workshop Probe New Front"), "workshop_probe_new_front_workshop_probe_shared_back");
+        renamed.setCustom();
+        common.getEditor().putCard(renamed);
+        common.getEditor().removeCard(first);
+        Assert.assertNull(common.getCard("Workshop Probe Old Front"));
+        Assert.assertNotNull(common.getFaceByName("Workshop Probe Shared Back"), "the renamed card still declares the back face");
+        Assert.assertNull(common.getRules("Workshop Probe Shared Back", true), "removeCard drops the alt-name entry the two cards shared: the reason reindexFaces exists");
+
+        common.getEditor().reindexFaces(renamed);
+        Assert.assertSame(common.getRules("Workshop Probe Shared Back", true), renamed, "the shared back face must resolve to the renamed card");
+        Assert.assertTrue(common.contains("Workshop Probe Shared Back"));
+        common.getEditor().removeCard(renamed);
+        Assert.assertNull(common.getRules("Workshop Probe Shared Back", true));
+    }
+
+    /**
+     * A CopyFaceFrom script borrows the OTHER card's face object; deleting the borrower must not
+     * de-index the card it borrowed from. Against the shared database, which holds the stock Liberate.
+     */
+    @Test
+    public void removingABorrowerLeavesTheLentFaceIndexed() {
+        final CardDb common = db.getCommonCards();
+        final ICardFace liberate = common.getFaceByName("Liberate");
+        Assert.assertNotNull(liberate, "the stock Liberate must be loaded for this test");
+        final String name = "Workshop Probe Borrower";
+        CardRules borrower = CardScriptProbe.parseRules("Name:" + name + "\nManaCost:1 W\nTypes:Instant\nOracle:\nAlternateMode:Split\n\nALTERNATE\n\nCopyFaceFrom:Liberate\n",
+                "workshop_probe_borrower_liberate");
+        borrower.setCustom();
+        common.getEditor().putCard(borrower);
+        Assert.assertSame(borrower.getOtherPart(), liberate, "putCard supplies the placeholder face from the database, as loadCard does");
+        final String fullName = name + " // Liberate";
+        Assert.assertNotNull(common.getCard(fullName));
+
+        common.getEditor().removeCard(borrower);
+        Assert.assertNull(common.getCard(fullName));
+        Assert.assertNull(common.getFaceByName(name));
+        Assert.assertSame(common.getFaceByName("Liberate"), liberate, "removing the borrower must leave Liberate's face indexed");
+        Assert.assertNotNull(common.getCard("Liberate"));
+    }
+
+    /**
+     * The in-memory half of New Card / Save / Delete / New Card again: a set-less custom card lands
+     * in USER, an in-place save updates the indexed face, removeCard frees the name (contains,
+     * getRules with alt names, getFaceByName) so it can be re-added.
+     */
+    @Test
+    public void customCardRoundTripsThroughTheEditor() {
+        final CardDb common = editorDb;
+        final String name = "Workshop Probe Bear";
+        final String stem = "workshop_probe_bear";
+        Assert.assertFalse(common.contains(name));
+        Assert.assertNull(common.getRules(name, true));
+
+        // New Card
+        CardRules rules = CardScriptProbe.parseRules("Name:" + name + "\nManaCost:1 G\nTypes:Creature Bear\nPT:2/2\nOracle:\n", stem);
+        rules.setCustom();
+        common.getEditor().putCard(rules);
+        PaperCard pc = common.getCard(name);
+        Assert.assertNotNull(pc, "putCard must make the card retrievable by name");
+        Assert.assertEquals(pc.getEdition(), "USER", "a set-less custom card is filed under USER, as at load time");
+        Assert.assertEquals(pc.getRules().getNormalizedName(), stem);
+        Assert.assertNotNull(common.getFaceByName(name), "putCard must index the face");
+        Assert.assertTrue(pc.getCardImageKey().startsWith("USER/"), pc.getCardImageKey());
+
+        // Save (same name): the existing rules object is reinitialized and the face re-indexed
+        CardRules edited = CardScriptProbe.parseRules("Name:" + name + "\nManaCost:1 G\nTypes:Creature Bear\nPT:3/3\nOracle:It grew.\n", stem);
+        edited.setCustom();
+        CardRules kept = common.getEditor().putCard(edited);
+        Assert.assertSame(kept, pc.getRules(), "same name reinitializes in place");
+        Assert.assertEquals(common.getFaceByName(name).getOracleText(), "It grew.");
+        Assert.assertEquals(common.getCard(name).getRules().getMainPart().getPower(), "3");
+
+        // Delete
+        List<PaperCard> gone = common.getEditor().removeCard(pc.getRules());
+        Assert.assertEquals(gone.size(), 1);
+        Assert.assertFalse(common.contains(name));
+        Assert.assertNull(common.getRules(name, true));
+        Assert.assertNull(common.getFaceByName(name));
+        Assert.assertNull(common.getCard(name));
+        Assert.assertFalse(common.getUniqueCards().contains(pc));
+
+        // New Card again with the same name, in the same session
+        CardRules again = CardScriptProbe.parseRules("Name:" + name + "\nManaCost:2 G\nTypes:Creature Bear\nPT:1/1\nOracle:\n", stem);
+        again.setCustom();
+        common.getEditor().putCard(again);
+        Assert.assertNotNull(common.getCard(name));
+        Assert.assertSame(common.getCard(name).getRules(), again);
+        common.getEditor().removeCard(again);
+        Assert.assertFalse(common.contains(name));
     }
 }

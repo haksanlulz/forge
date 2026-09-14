@@ -1361,11 +1361,61 @@ public final class CardDb implements ICardDatabase, IDeckGenPool {
 
         public CardRules putCard(CardRules rules, List<Pair<String, CardRarity>> whenItWasPrinted) {
             // works similarly to Map<K,V>, returning prev. value
+            if (rules.hasPlaceholderFaces()) {
+                // a CopyFaceFrom script borrows another card's face object, as loadCard() supplies it
+                rules.supplyPlaceholderFaces(facesByName);
+            }
             String cardName = rules.getName();
 
             CardRules result = rulesByPrimaryName.get(cardName);
             if (result != null && result.getName().equals(cardName)) { // change properties only
+                List<ICardFace> oldFaces = new ArrayList<>(result.getAllFaces());
+                List<PaperCard> printings = new ArrayList<>(allCardsByRules.get(result));
+                // the face objects are replaced, and a back face may be renamed: drop every index entry
+                // of the old faces (the face, the alt-name rules lookup, the accent mapping, the printings
+                // listed under the alt names), then index the new ones, as addCard does for a fresh card
+                for (ICardFace face : oldFaces) {
+                    if (face == null || isBorrowedFace(face, result)) {
+                        continue;
+                    }
+                    facesByName.remove(face.getName(), face);
+                    if (!face.getName().equals(cardName)) {
+                        allCardsByName.get(face.getName()).removeAll(printings);
+                        if (rulesByAltName.get(face.getName()) == result) {
+                            rulesByAltName.remove(face.getName());
+                        }
+                        final String normalName = StringUtils.stripAccents(face.getName());
+                        if (!normalName.equals(face.getName())) {
+                            normalizedNames.remove(normalName, face.getName());
+                        }
+                    }
+                    if (face.getFlavorName() != null) {
+                        facesByName.remove(face.getFlavorName(), face);
+                        allCardsByName.get(face.getFlavorName()).removeAll(printings);
+                    }
+                    forgetFaceCaches(face);
+                }
                 result.reinitializeFromRules(rules);
+                for (ICardFace face : result.getAllFaces()) {
+                    addFaceToDbNames(face, result);
+                    forgetFaceCaches(face);
+                }
+                if (result.hasFunctionalVariants()) {
+                    cacheRuleFlavorNames(result);
+                }
+                for (PaperCard printing : printings) {
+                    for (ICardFace face : printing.getAllFaces()) {
+                        if (!face.getName().equals(cardName) && !allCardsByName.containsEntry(face.getName(), printing)) {
+                            allCardsByName.put(face.getName(), printing);
+                        }
+                        if (face.getFlavorName() != null && !allCardsByName.containsEntry(face.getFlavorName(), printing)) {
+                            allCardsByName.put(face.getFlavorName(), printing);
+                        }
+                    }
+                }
+                if (immediateReindex) {
+                    reIndex();
+                }
                 return result;
             }
 
@@ -1374,6 +1424,7 @@ public final class CardDb implements ICardDatabase, IDeckGenPool {
             // Workshop rename) was otherwise retrievable by name only until the next start
             for (ICardFace face : rules.getAllFaces()) {
                 addFaceToDbNames(face, rules);
+                forgetFaceCaches(face);
             }
             if (rules.hasFunctionalVariants()) {
                 cacheRuleFlavorNames(rules);
@@ -1424,6 +1475,94 @@ public final class CardDb implements ICardDatabase, IDeckGenPool {
                 reIndex();
             }
             return result;
+        }
+
+        /**
+         * Removes a card and every printing of it from this database. Only meant for cards that were
+         * added at runtime (a custom card the Workshop is deleting); it walks every per-rules index so
+         * that the same name can be re-added afterwards without a restart.
+         *
+         * @return the printings that were removed, so the caller can drop them from any view that lists them
+         */
+        public List<PaperCard> removeCard(CardRules rules) {
+            List<PaperCard> gone = new ArrayList<>(allCardsByRules.get(rules));
+            allCardsByName.values().removeIf(gone::contains);
+            allCardsByRules.removeAll(rules);
+            uniqueCardsByRules.remove(rules);
+            if (rulesByPrimaryName.get(rules.getName()) == rules) {
+                rulesByPrimaryName.remove(rules.getName());
+            }
+            rulesByAltName.values().removeIf(r -> r == rules);
+            for (ICardFace face : rules.getAllFaces()) {
+                if (face == null || isBorrowedFace(face, rules)) {
+                    continue; // a face supplied through CopyFaceFrom is another card's: its index entries stay
+                }
+                facesByName.remove(face.getName(), face);
+                // the accent mapping and the flavor entry are keyed by name, not by face: another card still
+                // indexed under the same name (a renamed card registered before its original is removed, an
+                // unchanged back face between them) keeps them
+                final String normalName = StringUtils.stripAccents(face.getName());
+                if (!normalName.equals(face.getName()) && !facesByName.containsKey(face.getName())) {
+                    normalizedNames.remove(normalName, face.getName());
+                }
+                if (face.getFlavorName() != null) {
+                    facesByName.remove(face.getFlavorName(), face);
+                    if (!facesByName.containsKey(face.getFlavorName())) {
+                        uniqueCardsByFlavorName.remove(face.getFlavorName());
+                    }
+                }
+                forgetFaceCaches(face);
+            }
+            if (rules.getSupportedFunctionalVariants() != null) {
+                for (String variantName : rules.getSupportedFunctionalVariants()) {
+                    String name = rules.getDisplayNameForVariant(variantName);
+                    flavorNameMappings.remove(name);
+                    uniqueCardsByFlavorName.remove(name);
+                }
+                flavorNameMappings.remove(rules.getName());
+            }
+            if (immediateReindex) {
+                reIndex();
+            }
+            return gone;
+        }
+
+        /**
+         * Re-lists a card's faces in the name indexes. For a card registered BEFORE a same-faced
+         * predecessor was removed (the Workshop rename): removeCard dropped the alt-name entry the two
+         * shared, since the add path's putIfAbsent had left it pointing at the predecessor.
+         */
+        public void reindexFaces(CardRules rules) {
+            for (ICardFace face : rules.getAllFaces()) {
+                addFaceToDbNames(face, rules);
+            }
+            if (rules.hasFunctionalVariants()) {
+                cacheRuleFlavorNames(rules);
+            }
+        }
+
+        /**
+         * True when this face object belongs to a different card's rules: a script that says
+         * {@code CopyFaceFrom:X} gets X's own face object inserted into its face list, so evicting
+         * it here would de-index X for the rest of the session.
+         */
+        private boolean isBorrowedFace(ICardFace face, CardRules rules) {
+            for (CardRules candidate : new CardRules[] { rulesByPrimaryName.get(face.getName()), rulesByAltName.get(face.getName()) }) {
+                if (candidate != null && candidate != rules && candidate.getAllFaces().contains(face)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private void forgetFaceCaches(ICardFace face) {
+            if (face == null) {
+                return;
+            }
+            nonLegendaryCreatureNames.remove(face.getName());
+            if (face.getFlavorName() != null) {
+                nonLegendaryCreatureNames.remove(face.getFlavorName());
+            }
         }
 
         public boolean isImmediateReindex() {
