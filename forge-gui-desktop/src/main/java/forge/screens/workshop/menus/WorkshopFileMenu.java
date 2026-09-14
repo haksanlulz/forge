@@ -31,7 +31,16 @@ public final class WorkshopFileMenu {
         menu.add(getMenuItem_NewCard());
         menu.add(getMenuItem_AddArtVariant());
         menu.add(getMenuItem_SaveCard());
+        menu.addSeparator();
+        menu.add(getMenuItem_ExportSet());
         return menu;
+    }
+
+    private static JMenuItem getMenuItem_ExportSet() {
+        SkinnedMenuItem menuItem = new SkinnedMenuItem(Localizer.getInstance().getMessage("lblWorkshopExportSet"));
+        menuItem.setIcon(showIcons ? MenuUtil.getMenuIcon(FSkinProp.ICO_SAVEAS) : null);
+        menuItem.addActionListener(e -> CCardDesigner.SINGLETON_INSTANCE.exportSet());
+        return menuItem;
     }
 
     private static JMenuItem menuItem_SaveCard;

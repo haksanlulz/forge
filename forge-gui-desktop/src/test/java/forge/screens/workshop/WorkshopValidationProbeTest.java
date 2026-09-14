@@ -529,4 +529,22 @@ public class WorkshopValidationProbeTest {
         Assert.assertNull(CardScriptInfo.stockStemForName("Grizzly"), "a prefix of a stock name is not that card");
         Assert.assertNull(CardScriptInfo.stockStemForName("Workshop Probe Nothing"));
     }
+
+    /**
+     * The export README warns about a custom script that replaces a stock card, which the reader
+     * decides by name: a double-faced card by its front face, a split card by both halves, ignoring
+     * case. A name that only starts a stock file name ("Grizzly"), or is one half of a split card,
+     * is not a stock card's.
+     */
+    @Test
+    public void isStockCardNameMatchesTheReadersKey() {
+        Assert.assertTrue(WorkshopFiles.isStockCardName("Grizzly Bears"));
+        Assert.assertTrue(WorkshopFiles.isStockCardName("Delver of Secrets"), "a DFC's joined file");
+        Assert.assertTrue(WorkshopFiles.isStockCardName("fire // ice"), "a split card, ignoring case");
+        Assert.assertTrue(WorkshopFiles.isStockCardName("Elesh Norn"), "a DFC whose front name starts another card's file name");
+        Assert.assertFalse(WorkshopFiles.isStockCardName("Fire"), "half of a split card is not a card name");
+        Assert.assertFalse(WorkshopFiles.isStockCardName("Grizzly-Bears"), "the stem of a stock card under another name");
+        Assert.assertFalse(WorkshopFiles.isStockCardName("Grizzly"), "a prefix of a stock name is not that card");
+        Assert.assertFalse(WorkshopFiles.isStockCardName("Workshop Probe Nothing"));
+    }
 }

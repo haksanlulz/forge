@@ -7,17 +7,25 @@ import java.nio.file.Files;
 import java.nio.file.InvalidPathException;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
+import java.util.Collection;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.TreeSet;
+import java.util.function.Predicate;
 import java.util.regex.Matcher;
 
 import javax.imageio.ImageIO;
 
 import forge.card.CardEdition;
 import forge.card.CardRarity;
+import forge.card.CardRules;
+import forge.gui.card.CardScriptInfo;
+import forge.gui.card.CardScriptProbe;
 import forge.util.FileSection;
 import forge.util.FileUtil;
+import forge.util.ZipUtil;
 
 /**
  * The file-system half of the Workshop's custom-card features. Pure IO over plain paths: no Swing,
@@ -341,5 +349,286 @@ public final class WorkshopFiles {
             }
         }
         return dest;
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Export Set
+
+    /** Entry prefix (forward slashes) each root is packed under. */
+    public static final String EXPORT_CARDS = "custom/cards";
+    public static final String EXPORT_EDITIONS = "custom/editions";
+    public static final String EXPORT_TOKENS = "custom/tokens";
+    public static final String EXPORT_PICS = "Cache/pics/cards";
+    public static final String README_NAME = "README.txt";
+
+    /**
+     * The directories an exported set is made of, keyed by the prefix they are packed under. The
+     * Workshop Art edition's picture folder is never one of them (see {@link #exportExclusions}), nor
+     * is a folder name that is not a single plain path segment: an edition's Code2 names its folder.
+     *
+     * @param customDir  the user's {@code custom/} dir (holding cards/, editions/, tokens/)
+     * @param picsRoot   the card picture cache root
+     * @param setFolders the picture sub-folders to include - one per custom edition (plus USER)
+     */
+    public static LinkedHashMap<String, File> exportRoots(final File customDir, final File picsRoot, final Collection<String> setFolders) {
+        final LinkedHashMap<String, File> roots = new LinkedHashMap<>();
+        roots.put(EXPORT_CARDS, new File(customDir, "cards"));
+        roots.put(EXPORT_EDITIONS, new File(customDir, "editions"));
+        roots.put(EXPORT_TOKENS, new File(customDir, "tokens"));
+        for (final String folder : new TreeSet<>(setFolders)) {
+            if (folder == null || folder.isEmpty() || folder.equals(".") || folder.equals("..")
+                    || folder.indexOf('/') >= 0 || folder.indexOf('\\') >= 0 || folder.equalsIgnoreCase(ART_EDITION_CODE)) {
+                continue;
+            }
+            roots.put(EXPORT_PICS + "/" + folder, new File(picsRoot, folder));
+        }
+        return roots;
+    }
+
+    /**
+     * What an export leaves out of its roots: the Workshop Art edition file, found by its name or its
+     * {@code Code=} line. That edition is each player's own (Add Art Variant files their pictures of
+     * stock cards there, under one fixed file name and code), so a copy installed from someone else's
+     * pack would replace theirs, and the printings it lists would lose their pictures.
+     */
+    static List<File> exportExclusions(final Map<String, File> roots) {
+        final List<File> out = new ArrayList<>();
+        final File editions = roots.get(EXPORT_EDITIONS);
+        final File[] files = editions == null ? null : editions.listFiles();
+        if (files == null) {
+            return out;
+        }
+        for (final File f : files) {
+            if (f.isFile() && (f.getName().equalsIgnoreCase(ART_EDITION_FILE) || declaresWorkshopArtCode(f))) {
+                out.add(f);
+            }
+        }
+        return out;
+    }
+
+    private static boolean declaresWorkshopArtCode(final File editionFile) {
+        try {
+            for (final String line : Files.readAllLines(editionFile.toPath(), StandardCharsets.UTF_8)) {
+                final int eq = line.indexOf('=');
+                if (eq > 0 && line.substring(0, eq).trim().equalsIgnoreCase("Code")) {
+                    return line.substring(eq + 1).trim().equalsIgnoreCase(ART_EDITION_CODE);
+                }
+            }
+        } catch (final IOException | RuntimeException ex) {
+            // unreadable: the reader cannot load it either, so it is packed as it is
+        }
+        return false;
+    }
+
+    /** True when at least one root holds a file the archive would carry (see {@link ZipUtil#packedFiles}). */
+    public static boolean hasAnythingToExport(final Map<String, File> roots) {
+        final List<File> exclude = exportExclusions(roots);
+        for (final File root : roots.values()) {
+            try {
+                if (!ZipUtil.packedFiles(root, exclude).isEmpty()) {
+                    return true;
+                }
+            } catch (final IOException ex) {
+                // unreadable root: nothing exportable in it
+            }
+        }
+        return false;
+    }
+
+    /**
+     * The packed root a destination sits inside, or null. The walk skips the archive and its
+     * {@code .part} already; this turns a destination inside a packed folder into a clear refusal
+     * up front, before anything is written.
+     */
+    public static File rootContaining(final File dest, final Map<String, File> roots) throws IOException {
+        final String destPath = dest.getCanonicalPath();
+        for (final File root : roots.values()) {
+            if (root != null && root.isDirectory() && destPath.startsWith(root.getCanonicalPath() + File.separator)) {
+                return root;
+            }
+        }
+        return null;
+    }
+
+    /** What went into an export, per root. */
+    public static final class ExportReport {
+        public final Map<String, Integer> filesPerRoot = new LinkedHashMap<>();
+
+        public int totalFiles() {
+            int n = 0;
+            for (final int c : filesPerRoot.values()) {
+                n += c;
+            }
+            return n;
+        }
+
+        @Override
+        public String toString() {
+            final StringBuilder sb = new StringBuilder();
+            for (final Map.Entry<String, Integer> e : filesPerRoot.entrySet()) {
+                if (e.getValue() > 0) {
+                    sb.append(e.getKey()).append(": ").append(e.getValue()).append('\n');
+                }
+            }
+            return sb.toString().trim();
+        }
+    }
+
+    /**
+     * Packs the roots (see {@link #exportRoots}), less {@link #exportExclusions}, and an install README
+     * into {@code destZip}. Goes through {@link ZipUtil#zipRoots}, so a failure never leaves a truncated
+     * archive behind, and refuses a destination inside one of the roots (see {@link #rootContaining}).
+     *
+     * @param isStockName whether a stock card goes by a card name (see {@link #isStockCardName}): a packed
+     *                    script declaring that name (see {@link #cardName}) replaces the stock card, which
+     *                    the README names for whoever installs the pack
+     */
+    public static ExportReport exportPack(final File destZip, final Map<String, File> roots, final Predicate<String> isStockName) throws IOException {
+        final File inside = rootContaining(destZip, roots);
+        if (inside != null) {
+            throw new IOException("the archive cannot be written inside a folder it packs: " + inside);
+        }
+        final List<File> exclude = exportExclusions(roots);
+        final ExportReport report = new ExportReport();
+        for (final Map.Entry<String, File> root : roots.entrySet()) {
+            report.filesPerRoot.put(root.getKey(), ZipUtil.packedFiles(root.getValue(), exclude).size());
+        }
+        final List<String> overrides = new ArrayList<>();
+        final File cards = roots.get(EXPORT_CARDS);
+        for (final File script : ZipUtil.packedFiles(cards, exclude)) {
+            final String name = script.getName().endsWith(".txt") ? cardName(script) : null;
+            if (name != null && isStockName.test(name)) {
+                final String entry = EXPORT_CARDS + "/" + cards.toPath().relativize(script.toPath()).toString().replace(File.separatorChar, '/');
+                overrides.add(name + " (" + entry + ")");
+            }
+        }
+        ZipUtil.zipRoots(destZip, roots, Map.of(README_NAME, readme(overrides)), exclude);
+        return report;
+    }
+
+    /**
+     * The name the card reader files a script's rules under, which is what a custom script replaces a
+     * stock card by (its file name plays no part): {@code CardRules.getPreInitName()}, so a split card
+     * is "Left // Right". The first {@code Name:} line when the script does not parse that far, and
+     * null when it has neither. Called on .txt files only, the only kind the reader loads.
+     */
+    static String cardName(final File script) {
+        final String text;
+        try {
+            text = new String(Files.readAllBytes(script.toPath()), StandardCharsets.UTF_8);
+        } catch (final IOException | RuntimeException ex) {
+            return null;
+        }
+        final String fileName = script.getName();
+        try {
+            final String name = CardScriptProbe.parseRules(text, fileName.substring(0, fileName.length() - ".txt".length())).getPreInitName();
+            if (name != null && !name.isEmpty()) {
+                return name;
+            }
+        } catch (final RuntimeException ex) {
+            // a split script without its second face: its Name: line below
+        }
+        for (final String line : CardScriptProbe.scriptLines(text)) {
+            if (line.startsWith("Name:")) {
+                return line.substring("Name:".length()).trim();
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Whether a stock card goes by this name, compared the way the card reader keys rules (ignoring
+     * case). A stem is shared by names that differ in punctuation ("Fire Ice" has the stem of
+     * "Fire // Ice"), so the stock script's own name decides.
+     */
+    public static boolean isStockCardName(final String name) {
+        final String stem = CardScriptInfo.stockStemForName(name);
+        final String stock = stem == null ? null : CardScriptInfo.readStockScript(stem);
+        if (stock == null) {
+            return false;
+        }
+        try {
+            final CardRules rules = CardScriptProbe.parseRules(stock, stem);
+            return name.equalsIgnoreCase(rules.getPreInitName());
+        } catch (final RuntimeException ex) {
+            return true; //a stock script under this name's stem that does not parse: warn rather than stay silent
+        }
+    }
+
+    /**
+     * Plain English on purpose (not a Localizer key): it ships inside the pack to other players,
+     * whose Forge language is unknown.
+     *
+     * @param overrides the pack's custom scripts that replace a stock card, as "Name (entry)"; the
+     *                  README lists them with a warning, since installing one changes that card for
+     *                  whoever installs the pack
+     */
+    public static String readme(final List<String> overrides) {
+        final List<String> lines = new ArrayList<>(List.of(
+                "Forge custom card set",
+                "=====================",
+                "",
+                "This archive was exported from Forge's Workshop. It holds custom card scripts,",
+                "custom edition files and card pictures. Every player in a network game needs",
+                "this same pack installed, or the custom cards will not load on their side.",
+                "",
+                "Contents",
+                "--------",
+                "  custom/cards/        card scripts      -> <user dir>/custom/cards/",
+                "  custom/editions/     edition files     -> <user dir>/custom/editions/",
+                "  custom/tokens/       token scripts     -> <user dir>/custom/tokens/",
+                "  Cache/pics/cards/    card pictures     -> <picture dir>/ (the set folders)",
+                "  README.txt           this file",
+                "",
+                "Where to put it",
+                "---------------",
+                "Copy the custom/ folder into the Forge user directory, so that it becomes",
+                "<user dir>/custom/ (merge it with a custom/ folder that is already there), and",
+                "copy the CONTENTS of Cache/pics/cards/ (the set folders inside it) into the card",
+                "picture directory. The default locations are:",
+                "",
+                "  Windows   user dir:     %APPDATA%\\Forge\\",
+                "            picture dir:  %LOCALAPPDATA%\\Forge\\Cache\\pics\\cards\\",
+                "  macOS     user dir:     ~/Library/Application Support/Forge/",
+                "            picture dir:  ~/Library/Caches/Forge/pics/cards/",
+                "  Linux     user dir:     ~/.forge/",
+                "            picture dir:  ~/.cache/forge/pics/cards/",
+                "",
+                "The \"Cache\" folder name in this archive is only where Windows keeps the picture",
+                "cache; on macOS and Linux the set folders go straight under pics/cards/.",
+                "If forge.profile.properties (in the Forge program folder) sets userDir, cacheDir",
+                "or cardPicsDir, those directories are used instead: the user dir is userDir,",
+                "and the picture dir is cardPicsDir, else <cacheDir>/pics/cards/.",
+                "",
+                "Restart Forge after copying. Custom cards appear in the deck editor and the",
+                "Workshop; set-less custom cards are filed under the USER edition.",
+                "",
+                "Not included: art for printings that belong to a stock (non-custom) set, such",
+                "as a custom override of a stock card. That art lives in the stock set's folder",
+                "next to downloaded pictures and is left for each player to supply. The",
+                "exporter's Workshop Art edition (custom/editions/Workshop Art.txt and its",
+                "pictures) is not included either: it holds each player's own art variants,",
+                "and installing someone else's would replace yours.",
+                ""));
+        if (!overrides.isEmpty()) {
+            lines.addAll(List.of(
+                    "Changed stock cards",
+                    "-------------------",
+                    "WARNING: these scripts replace the stock card of the same name. Once they are",
+                    "installed, that card plays by this pack's rules in every game, against the AI",
+                    "and online, until the file is removed again:",
+                    ""));
+            for (final String override : overrides) {
+                lines.add("  " + override);
+            }
+            lines.add("");
+        }
+        lines.addAll(List.of(
+                "Card pictures",
+                "-------------",
+                "The pictures in this pack are whatever the person who exported it chose. Only",
+                "share a pack whose pictures you have the right to share.",
+                ""));
+        return String.join("\n", lines);
     }
 }
