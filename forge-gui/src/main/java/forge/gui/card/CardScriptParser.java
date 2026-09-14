@@ -5,11 +5,13 @@ import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
 import forge.card.CardType;
+import forge.card.MagicColor;
 import forge.game.ability.AbilityFactory;
 import forge.game.ability.AbilityFactory.AbilityRecordType;
 import forge.game.ability.ApiType;
 import forge.game.replacement.ReplacementType;
 import forge.game.trigger.TriggerType;
+import forge.util.TextUtil;
 import org.apache.commons.lang3.StringUtils;
 
 import java.util.List;
@@ -30,7 +32,8 @@ public final class CardScriptParser {
                 continue;
             }
             if (line.startsWith("SVar:")) {
-                final String[] sVarParts = StringUtils.split(line, ':');
+                // limit 3: the value may itself hold colons (KW$ Protection:Card.Red, a Picture URL)
+                final String[] sVarParts = line.split(":", 3);
                 if (sVarParts.length != 3) {
                     continue;
                 }
@@ -54,11 +57,13 @@ public final class CardScriptParser {
     private Map<Integer, Integer> getErrorRegions(final boolean quick) {
         final Map<Integer, Integer> result = Maps.newTreeMap();
 
-        final String[] lines = StringUtils.split(script, '\n');
+        // keep empty lines: every line, empty or not, advances the region index by its length + 1
+        final String[] lines = script.split("\n", -1);
         int index = 0;
         for (final String line : lines) {
             final String trimLine = line.trim();
-            if (StringUtils.isEmpty(line)) {
+            if (StringUtils.isEmpty(trimLine)) {
+                index += line.length() + 1;
                 continue;
             }
             boolean bad = false;
@@ -110,37 +115,59 @@ public final class CardScriptParser {
         }
 
         for (final String part : StringUtils.split(manaCost, ' ')) {
-            if (StringUtils.isNumeric(part) || part.equals("X")) {
-                continue;
+            if (!isManaCostPart(part)) {
+                return false;
             }
-            return isManaCostPart(part);
         }
         return true;
     }
 
+    /**
+     * One space-separated part of a mana cost as the scripts write it: a generic amount, X/Y/Z, a
+     * single symbol, or a hybrid shard written as its letters ({@code WU}, {@code 2R}, {@code BP} for
+     * Phyrexian, {@code 2/W}). Shape check only; ManaCost owns the grammar.
+     */
     private static boolean isManaCostPart(final String part) {
-        if (part.length() == 1) {
-            return isManaSymbol(part.charAt(0));
-        } else if (part.length() == 2) {
-            if (!(part.startsWith("P") || part.startsWith("2") || isManaSymbol(part.charAt(0)))) {
-                return false;
-            }
-            if (!isManaSymbol(part.charAt(1)) || part.charAt(0) == part.charAt(1)) {
-                return false;
-            }
+        if (StringUtils.isNumeric(part) || part.equals("X") || part.equals("Y") || part.equals("Z")) {
             return true;
         }
-        return false;
+        if (part.isEmpty() || part.length() > 4) {
+            return false;
+        }
+        boolean symbol = false;
+        for (final char c : part.toCharArray()) {
+            if (isManaSymbol(c)) {
+                symbol = true;
+            } else if (c != 'P' && c != '2' && c != '/') {
+                return false;
+            }
+        }
+        return symbol;
     }
     private static boolean isManaSymbol(final char c) {
         return c == 'W' || c == 'U' || c == 'B' || c == 'R' || c == 'G' || c == 'S' || c == 'C';
     }
 
     private static boolean isTypeLegal(final String type) {
-        for (final String t : StringUtils.split(type, ' ')) {
-            if (!isSingleTypeLegal(t)) {
+        // walk the line as CardType.parse does: a multi-word type ("Time Lord", "Serra's Realm") first, else one word
+        int start = 0;
+        while (start < type.length()) {
+            final String rest = type.substring(start);
+            String t = null;
+            for (final String multi : CardType.Constant.MultiwordTypes) {
+                if (rest.startsWith(multi)) {
+                    t = multi;
+                    break;
+                }
+            }
+            if (t == null) {
+                final int space = rest.indexOf(' ');
+                t = space < 0 ? rest : rest.substring(0, space);
+            }
+            if (!t.isEmpty() && !isSingleTypeLegal(t)) {
                 return false;
             }
+            start += t.length() + 1;
         }
         return true;
     }
@@ -153,11 +180,14 @@ public final class CardScriptParser {
         final List<KeyValuePair> params = Lists.newArrayList();
         int currentIndex = offset;
         for (final String part : parts) {
-            final String[] subParts = StringUtils.split(part, '$');
-            if (subParts.length > 0) {
-                params.add(new KeyValuePair(subParts[0], subParts.length > 1 ? subParts[1] : "", currentIndex));
-            } else {
+            // first '$' only, as FileSection.parseToMap splits: a value may hold its own (Count$..., TriggerCount$...)
+            final int dollar = part.indexOf('$');
+            if (StringUtils.isBlank(part)) {
                 errorRegions.put(currentIndex, part.length());
+            } else if (dollar < 0) {
+                params.add(new KeyValuePair(part, "", currentIndex));
+            } else {
+                params.add(new KeyValuePair(part.substring(0, dollar), part.substring(dollar + 1), currentIndex));
             }
             currentIndex += part.length() + 1;
         }
@@ -183,20 +213,30 @@ public final class CardScriptParser {
     private Map<Integer, Integer> getSubAbilityErrors(final String ability, final int offset) {
         return getAbilityErrors(ability, offset, false);
     }
-    private Map<Integer, Integer> getAbilityErrors(final String ability, final int offset, final boolean requireCost) {
+    private Map<Integer, Integer> getAbilityErrors(final String ability, final int offset, final boolean topLevel) {
         final Map<Integer, Integer> result = Maps.newTreeMap();
         final List<KeyValuePair> params = getParams(ability, offset, result);
+        if (params.isEmpty()) {
+            // "A:" with nothing after it (or an SVar ability left empty): no declarer to check, nothing to index into
+            result.put(offset, Math.max(1, ability.length()));
+            return result;
+        }
 
         // First parameter should be Api declaration
-        if (!isAbilityApiDeclarerLegal(params.get(0).getKey())) {
+        final String declarer = params.get(0).getKey().trim();
+        if (!isAbilityApiDeclarerLegal(declarer)) {
             result.put(params.get(0).startIndex(), params.get(0).length());
         }
-        // If present, second parameter should be cost
-        if (requireCost && !params.get(1).getKey().trim().equals("Cost")) {
-            result.put(params.get(1).startIndex(), params.get(1).length());
+        // An activated or static ability needs a Cost somewhere in its parameters; a spell (SP) falls back
+        // to the card's mana cost and a sub-ability (DB) never has one (AbilityFactory.parseAbilityCost).
+        if (topLevel && !declarer.equals(AbilityRecordType.Spell.getPrefix())
+                && params.stream().noneMatch(p -> p.getKey().trim().equals("Cost"))) {
+            result.put(params.get(0).startIndex(), params.get(0).length());
         }
 
-        // Now, check all parameters
+        // Now, check the parameters whose vocabulary is known. Every other key is left alone: each
+        // ApiType reads its own parameters and there is no registry of them, so an unrecognized key
+        // is not evidence of an error.
         for (final KeyValuePair param : params) {
             boolean isBadValue = false;
             final String trimKey = param.getKey().trim(), trimValue = param.getValue().trim();
@@ -208,8 +248,13 @@ public final class CardScriptParser {
                 if (!isCostLegal(trimValue)) {
                     isBadValue = true;
                 }
-            } else if (trimKey.equals("ValidTgts") || trimKey.equals("ValidCards")) {
+            } else if (trimKey.equals("ValidTgts")) {
                 if (!isValidLegal(trimValue)) {
+                    isBadValue = true;
+                }
+            } else if (trimKey.equals("ValidCards")) {
+                // a ValidCards list may also name a Defined set (Remembered, Targeted, ...)
+                if (!isValidLegal(trimValue) && !isDefinedLegal(trimValue)) {
                     isBadValue = true;
                 }
             } else if (trimKey.equals("Defined")) {
@@ -227,8 +272,6 @@ public final class CardScriptParser {
                 } else {
                     isBadValue = true;
                 }
-            } else {
-                result.put(param.startIndex(), param.keyLength());
             }
             if (isBadValue) {
                 result.put(param.startIndexValue(), param.valueLength());
@@ -259,9 +302,12 @@ public final class CardScriptParser {
                 if (trimValue.isEmpty()) {
                     isBadValue = true;
                 }
-            } else {
-                result.put(param.startIndex(), param.keyLength());
+            } else if (trimKey.equals("ValidCard")) {
+                if (!isValidLegal(trimValue) && !isDefinedLegal(trimValue)) {
+                    isBadValue = true;
+                }
             }
+            // other keys are the replacement type's own parameters: no registry, so no verdict
             if (isBadValue) {
                 result.put(param.startIndexValue(), param.valueLength());
             }
@@ -296,12 +342,11 @@ public final class CardScriptParser {
                     isBadValue = true;
                 }
             } else if (trimKey.equals("ValidCard")) {
-                if (!isValidLegal(trimValue)) {
+                if (!isValidLegal(trimValue) && !isDefinedLegal(trimValue)) {
                     isBadValue = true;
                 }
-            } else {
-                result.put(param.startIndex(), param.keyLength());
             }
+            // other keys are the trigger mode's own parameters: no registry, so no verdict
             if (isBadValue) {
                 result.put(param.startIndexValue(), param.valueLength());
             }
@@ -309,8 +354,42 @@ public final class CardScriptParser {
         return result;
     }
 
+    /** The bracketed cost parts {@code forge.game.cost.Cost#parseCostPart} recognizes, without their {@code <}. */
+    private static final Set<String> COST_PARTS = ImmutableSortedSet.of(
+            "AddCounter", "AddCounterYou", "AddMana", "Behold", "BeholdExile", "Blight", "ChooseCard",
+            "ChooseColor", "ChooseCreatureType", "CollectEvidence", "DamageYou", "Discard", "Draw",
+            "Enlist", "Exert", "Exile", "ExileAnyGrave", "ExileCtrlOrGrave", "ExileFromGrave",
+            "ExileFromHand", "ExileFromStack", "ExileFromTop", "ExileSameGrave", "ExiledMoveToGrave",
+            "FlipCoin", "GainControl", "GainLife", "Mana", "Mill", "PayEnergy", "PayLife", "PayShards",
+            "PutCardToLibFromBattlefield", "PutCardToLibFromGrave", "PutCardToLibFromHand",
+            "PutCardToLibFromSameGrave", "RemoveAnyCounter", "Return", "Reveal", "RevealChosen",
+            "RevealFromExile", "RevealOrChoose", "RollDice", "Sac", "SubCounter", "Teamwork", "Unattach",
+            "Waterbend", "tapXType", "untapYType");
+    /** The bare cost words the same parser recognizes. */
+    private static final Set<String> COST_WORDS = ImmutableSortedSet.of(
+            "T", "Tap", "Q", "Untap", "Mandatory", "Forage", "PromiseGift");
+
+    /**
+     * A cost as {@code forge.game.cost.Cost} reads it: space-separated parts (spaces inside {@code <...>}
+     * belong to the part), each a bare cost word, an {@code XMin} marker, a bracketed cost part, or a
+     * piece of the mana cost.
+     */
     private static boolean isCostLegal(final String cost) {
-        return isManaCostLegal(cost.trim()); // TODO include other costs (tap, sacrifice, etc.)
+        final String trimmed = cost.trim();
+        if (trimmed.isEmpty()) {
+            return false;
+        }
+        for (final String part : TextUtil.splitWithParenthesis(trimmed, ' ', '<', '>')) {
+            if (COST_WORDS.contains(part) || part.startsWith("XMin") || isManaCostPart(part)) {
+                continue;
+            }
+            final int open = part.indexOf('<');
+            if (open > 0 && part.endsWith(">") && COST_PARTS.contains(part.substring(0, open))) {
+                continue;
+            }
+            return false;
+        }
+        return true;
     }
 
     private static boolean isAbilityApiDeclarerLegal(final String declarer) {
@@ -347,77 +426,90 @@ public final class CardScriptParser {
     }
 
     /**
-     * Literal defined strings for cards and spellabilities.
+     * The Defined words {@code AbilityUtils.getDefinedCards}, {@code getDefinedPlayers} and
+     * {@code getDefinedSpellAbilities} match exactly, plus the paid-cost sets {@code getPaidCards} serves.
      */
-    private static final Set<String> DEFINED_CARDS = ImmutableSortedSet.of(
-            "Self", "OriginalHost", "EffectSource", "Equipped", "Enchanted",
-            "TopOfLibrary", "BottomOfLibrary", "Targeted", "ThisTargetedCard",
-            "ParentTarget", "Remembered", "DirectRemembered",
-            "DelayTriggerRemembered", "RememberedFirst", "Clones", "Imprinted",
-            "ChosenCard", "SacrificedCards", "Sacrificed", "DiscardedCards",
-            "Discarded", "ExiledCards", "Exiled", "TappedCards", "Tapped",
-            "UntappedCards", "Untapped", "Parent", "SourceFirstSpell");
-    /**
-     * Defined starting strings for cards and spellabilities.
-     */
-    private static final Set<String> DEFINED_CARDS_STARTSWITH = ImmutableSortedSet
-            .of("Triggered", "Replaced");
-    /**
-     * Literal defined strings for players.
-     */
-    private static final Set<String> DEFINED_PLAYERS = ImmutableSortedSet.of(
-            "Targeted", "TargetedPlayer", "ParentTarget", "TargetedController",
-            "TargetedOwner", "TargetedAndYou", "ParentTargetedController",
-            "Remembered", "DelayTriggerRemembered", "RememberedOpponents",
-            "RememberedController", "RememberedOwner", "ImprintedController",
-            "ImprintedOwner", "EnchantedController", "EnchantedOwner",
-            "EnchantedPlayer", "AttackingPlayer", "DefendingPlayer",
-            "ChosenPlayer", "SourceController", "CardOwner",
-            "ActivePlayer", "You", "Opponent");
-    /**
-     * Defined starting strings for players.
-     */
-    private static final Set<String> DEFINED_PLAYERS_STARTSWITH = ImmutableSortedSet
-            .of("Triggered", "OppNonTriggered", "Replaced");
+    private static final Set<String> DEFINED_LITERAL = ImmutableSortedSet.of(
+            "ActivePlayer", "AttackingPlayer", "CardController", "CardOwner", "Caster", "ChoosingPlayer",
+            "ChosenCard", "ChosenPlayer", "Colors", "Convoked", "CorrectedSelf", "DefendingPlayer",
+            "DelayTriggerRemembered", "DelayTriggerRememberedLKI", "DifferentColorPair", "DirectRemembered",
+            "EffectSource", "Enchanted", "EnchantedPlayer", "Equipped", "Exiler", "Imprinted", "ImprintedLKI",
+            "ManaSpender", "Opponent", "OriginalHost", "Parent", "ParentTarget", "ParentTargetedController",
+            "Promised", "Registered", "Remembered", "RememberedCard", "RememberedFirst", "RememberedLKI",
+            "RememberedLast", "Self", "SourceController", "SourceFirstSpell", "Targeted", "TargetedAndYou",
+            "TargetedCard", "TargetedController", "TargetedOrController", "TargetedOwner", "TargetedPlayer",
+            "TargetedSource", "ThisTargetedCard", "ThisTargetedController", "ThisTargetedOwner",
+            "ThisTargetedPlayer", "TopOfGraveyard", "Triggered", "TriggeredAttacker", "TriggeredBlocker",
+            "TriggeredCard", "TriggeredObject", "You",
+            "TopOfLibrary", "BottomOfLibrary", "Clones", "SacrificedCards", "Sacrificed", "DiscardedCards",
+            "Discarded", "ExiledCards", "Exiled", "TappedCards", "Tapped", "UntappedCards", "Untapped");
+    /** The Defined prefixes the same methods match with {@code startsWith}. */
+    private static final Set<String> DEFINED_PREFIX = ImmutableSortedSet.of(
+            "AllTypes", "Amount", "AttachedBy", "AttachedTo", "CardTypes", "CardUID_", "ChosenCard",
+            "CreatureType", "DelayTriggerRemembered", "Different", "EffectSource", "Enchanted", "Equipped",
+            "ExiledWith", "Flipped", "Greatest", "Imprinted", "LandType", "Least", "NextOpponentToYour",
+            "NextPlayerToYour", "Non", "OppNon", "OriginalHost", "PlayerNamed_", "PlayerUID_", "Remembered",
+            "Replaced", "TapPowerValue", "Targeted", "This", "Top", "Triggered");
+    /** The Defined suffixes {@code getDefinedPlayers} / {@code getDefinedSpellAbilities} match with {@code endsWith}. */
+    private static final Set<String> DEFINED_SUFFIX = ImmutableSortedSet.of(
+            "AndYou", "Controller", "OfLibrary", "Opponents", "Owner", "Remembered", "Targeted");
 
+    /**
+     * A Defined value: one of the words above, a {@code Valid...} card filter, or (as
+     * {@code getDefinedPlayers} does with anything else) a player filter such as {@code Player.Opponent}.
+     */
     private static boolean isDefinedLegal(final String defined) {
-        return isDefinedCardOrSaLegal(defined) || isDefinedPlayerLegal(defined);
-    }
-    private static boolean isDefinedCardOrSaLegal(final String defined) {
+        if (defined.isEmpty()) {
+            return false;
+        }
         if (defined.startsWith("Valid")) {
-            return isValidLegal(defined.substring("Valid".length()));
+            // "Valid <filter>", or "Valid<Zone> <filter>" (ValidGraveyard, ValidExile, ValidStack...)
+            final String rest = defined.substring("Valid".length());
+            final int space = rest.indexOf(' ');
+            return isValidLegal(space < 0 ? rest : rest.substring(space + 1).trim());
         }
-        if (DEFINED_CARDS.contains(defined)) {
+        final String head = defined.split("\\.", 2)[0];
+        if (DEFINED_LITERAL.contains(head) || DEFINED_PREFIX.stream().anyMatch(startsWith(head))
+                || DEFINED_SUFFIX.stream().anyMatch(head::endsWith)) {
             return true;
         }
-        return DEFINED_CARDS_STARTSWITH.stream().anyMatch(startsWith(defined));
-    }
-    private static boolean isDefinedPlayerLegal(final String defined) {
-        final boolean non = defined.startsWith("Non"), flipped = defined.startsWith("Flipped");
-        if (non || flipped) {
-            String newDefined = null;
-            if (non) {
-                newDefined = defined.substring("Non".length());
-            } else if (flipped) {
-                newDefined = defined.substring("Flipped".length());
-            }
-            return isDefinedPlayerLegal(newDefined);
-        }
-        if (DEFINED_PLAYERS.contains(defined)) {
-            return true;
-        }
-        return DEFINED_PLAYERS_STARTSWITH.stream().anyMatch(startsWith(defined));
+        return isValidLegal(defined);
     }
 
-    private static final Set<String> VALID_INCLUSIVE = ImmutableSortedSet.of(
-            "Spell", "Permanent", "Card");
+    /** The entity words {@code Card.isValid} accepts in front of the first dot (a card type also qualifies). */
+    private static final Set<String> VALID_CARD_INCLUSIVE = ImmutableSortedSet.of(
+            "Spell", "Permanent", "Card", "card", "Any", "Effect", "Emblem", "Boon");
+    /** The words {@code Player.isValid} accepts in front of the first dot. */
+    private static final Set<String> VALID_PLAYER_INCLUSIVE = ImmutableSortedSet.of(
+            "Player", "Opponent", "You", "Any");
+
+    /**
+     * A ValidTgts / ValidCards / ValidCard value: a comma-separated list ({@code TargetRestrictions}
+     * splits on the comma) of {@code [!]Entity[.property+property...]}.
+     */
     private static boolean isValidLegal(final String valid) {
+        if (valid.isEmpty()) {
+            return false;
+        }
+        for (final String part : StringUtils.split(valid, ',')) {
+            if (!isSingleValidLegal(part.trim())) {
+                return false;
+            }
+        }
+        return true;
+    }
+    private static boolean isSingleValidLegal(final String valid) {
         String remaining = valid;
-        if (remaining.charAt(0) == '!') {
+        if (remaining.startsWith("!")) {
             remaining = valid.substring(1);
         }
-        final String[] splitDot = remaining.split("\\.");
-        if (!(VALID_INCLUSIVE.contains(splitDot[0]) || isSingleTypeLegal(splitDot[0]))) {
+        if (remaining.isEmpty()) {
+            return false;
+        }
+        final String[] splitDot = remaining.split("\\.", 2);
+        final boolean card = VALID_CARD_INCLUSIVE.contains(splitDot[0]) || isSingleTypeLegal(splitDot[0]);
+        final boolean player = VALID_PLAYER_INCLUSIVE.contains(splitDot[0]);
+        if (!card && !player) {
             return false;
         }
         if (splitDot.length < 2) {
@@ -426,83 +518,143 @@ public final class CardScriptParser {
 
         final String[] splitPlus = StringUtils.split(splitDot[1], '+');
         for (final String excl : splitPlus) {
-            if (!isValidExclusive(excl)) {
+            if (!((card && isValidExclusive(excl)) || (player && isPlayerPropertyLegal(excl)))) {
                 return false;
             }
         }
         return true;
     }
 
-    private static final Set<String> VALID_EXCLUSIVE = ImmutableSortedSet.of(
-            "sameName", "namedCard", "NamedByRememberedPlayer", "Permanent",
-            "ChosenCard", "nonChosenCard", "White", "Blue", "Black", "Red",
-            "Green", "nonWhite", "nonBlue", "nonBlack", "nonRed", "nonGreen",
-            "Colorless", "nonColorless", "Multicolor", "Monocolor", "ChosenColor", "AllChosenColors",
-            "AnyChosenColor", "DoubleFaced", "Flip", "YouCtrl", "YourTeamCtrl",
-            "YouDontCtrl", "OppCtrl", "ChosenCtrl", "DefenderCtrl",
-            "DefenderCtrlForRemembered", "DefendingPlayerCtrl",
-            "EnchantedPlayerCtrl", "EnchantedControllerCtrl",
-            "RememberedPlayer", "RememberedPlayerCtrl", "TargetedPlayerCtrl",
-            "TargetedControllerCtrl", "ActivePlayerCtrl",
-            "YouOwn", "YouDontOwn", "OppOwn",
-            "TargetedPlayerOwn", "OwnerDoesntControl", "Other", "Self",
-            "AttachedBy", "Attached", "NameNotEnchantingEnchantedPlayer",
-            "Enchanted", "CanEnchantRemembered",
-            "CanEnchantSource", "CanBeEnchantedBy", "CanBeEnchantedByTargeted",
-            "EquippedBy", "EquippedByTargeted", "EquippedByEnchanted", "FortifiedBy",
-            "CanBeEquippedBy", "Equipped", "Fortified", "HauntedBy",
-            "notTributed", "madness", "Paired", "PairedWith",
-            "Above", "DirectlyAbove", "TopGraveyardCreature",
-            "BottomGraveyard", "TopLibrary", "BottomLibrary", "Cloned", "DamagedBy", "Damaged",
-            "sharesPermanentTypeWith", "canProduceSameManaTypeWith", "SecondSpellCastThisTurn",
-            "ThisTurnCast", "withFlashback", "tapped", "untapped", "faceDown",
-            "faceUp", "DrawnThisTurn",
-            "firstTurnControlled", "startedTheTurnUntapped",
-            "attackedOrBlockedSinceYourLastUpkeep", "blockedOrBeenBlockedSinceYourLastUpkeep",
-            "dealtDamageToYouThisTurn", "dealtDamageToOppThisTurn", "dealtDamageThisTurn",
-            "wasDealtDamageThisTurn",
-            "attackedThisTurn", "attackedLastTurn", "blockedThisTurn",
-            "gotBlockedThisTurn", "greatestPower", "yardGreatestPower",
-            "leastPower", "leastToughness", "greatestCMC",
-            "greatestRememberedCMC", "lowestRememberedCMC", "lowestCMC",
-            "enchanted", "enchanting", "equipped",
-            "equipping", "modified", "token", "hasXCost", "suspended",
-            "delved", "attacking", "attackingYou",
-            "attackedBySourceThisCombat", "blocking", "blockingSource",
-            "blockingCreatureYouCtrl", "blockingRemembered",
-            "sharesBlockingAssignmentWith", "blocked",
-            "blockedBySource", "blockedThisTurn", "blockedByThisTurn",
-            "blockedBySourceThisTurn", "isBlockedByRemembered", "blockedRemembered",
-            "blockedByRemembered", "unblocked", "attackersBandedWith",
-            "kicked", "kicked1", "kicked2", "evoked",
-            "HasDevoured", "IsMonstrous",
-            "CostsPhyrexianMana", "IsRemembered",
-            "IsImprinted", "hasManaAbility",
-            "hasNonManaActivatedAbility", "NoAbilities", "HasCounters",
-            "ChosenType", "IsNotChosenType", "IsCommander",
-            "IsRenowned");
-    private static final Set<String> VALID_EXCLUSIVE_STARTSWITH = ImmutableSortedSet.of(
-            "named", "OwnedBy", "ControlledBy",
-            "ControllerControls", "AttachedTo", "EnchantedBy",
-            "TopGraveyard", "SharesColorWith",
-            "MostProminentColor", "notSharesColorWith",
-            "sharesCreatureTypeWith", "sharesCardTypeWith", "sharesLandTypeWith",
-            "sharesNameWith", "doesNotShareNameWith",
-            "sharesControllerWith", "sharesOwnerWith",
-            "ThisTurnEntered", "sharesTypeWith", "hasKeyword", "with",
-            "greatestPowerControlledBy", "greatestCMCControlledBy",
-            "power", "toughness", "cmc", "totalPT", "counters", "non",
-            "RememberMap", "wasCastFrom", "set",
-            "inZone", "HasSVar", "hasAbility");
+    /** The properties {@code PlayerProperty.playerHasProperty} matches exactly. */
+    private static final Set<String> PLAYER_PROPERTY = ImmutableSortedSet.of(
+            "Activator", "Active", "Allies", "Attacking", "BeenAttackedThisCombat", "CanBeEnchantedBy",
+            "CardOwner", "CardsInHandAtBeginningOfTurn", "Chosen", "Defending", "EnchantedBy",
+            "EnchantedController", "IsCorrupted", "IsPoisoned", "IsRemembered", "IsRememberedOrController",
+            "IsTriggerRemembered", "LostLifeThisTurn", "MaxSpeed", "NoSpeed", "NonActive", "NotedDefender",
+            "Opponent", "OpponentToActive", "OriginalHostRemembered", "Other", "TappedLandForManaThisTurn",
+            "VenturedThisTurn", "You", "YourTeam", "attackedBySourceThisCombat", "attackedBySourceThisTurn",
+            "attackedWithCreaturesThisTurn", "attackedYouTheirCurrentTurn", "attackedYouTheirLastTurn",
+            "castSpellThisTurn", "committedCrimeThisTurn", "descended", "hasBlessing", "hasEnduringStory",
+            "hasInitiative", "isMonarch", "targetedBy");
+    /** The property prefixes the same method matches with {@code startsWith}. */
+    private static final Set<String> PLAYER_PROPERTY_PREFIX = ImmutableSortedSet.of(
+            "Condition", "HasCardsIn", "LostLifeThisTurn", "NotedFor", "OpponentOf", "PlayerUID_", "Triggered",
+            "attackedYouCtrlTheirCurrentTurn", "controls", "counters", "damageDoneSingleSource", "hasFewer",
+            "hasMore", "life", "wasAttackedThisTurnBy", "wasDealt", "withAtLeast", "withLowest", "withMore",
+            "withMost");
 
+    private static boolean isPlayerPropertyLegal(String property) {
+        if (property.startsWith("!")) {
+            property = property.substring(1);
+        }
+        return PLAYER_PROPERTY.contains(property) || PLAYER_PROPERTY_PREFIX.stream().anyMatch(startsWith(property));
+    }
+
+    /**
+     * The card properties {@code CardProperty.cardHasProperty} and {@code CardStateProperty.hasProperty}
+     * match exactly (their {@code equals} arms, 2026-09). What neither names falls through to the
+     * card's types and colors, handled in {@link #isValidExclusive}.
+     */
+    private static final Set<String> CARD_PROPERTY = ImmutableSortedSet.of(
+            "AdventureCard", "AssociatedWithChosenColor", "Attached", "BackSide", "CanBeSacrificedBy",
+            "CanPayManaCost", "CanTransform", "CastSaSource", "ChosenSector", "ChosenType", "ChosenType2",
+            "CostsPhyrexianMana", "CrewedBySourceThisTurn", "CrewedThisTurn", "Defending", "DifferentSector",
+            "DiscardedThisTurn", "DoubleFaced", "EffectSource", "EnchantedBy", "EncodedWithSource",
+            "EnteredSinceYourLastTurn", "ExiledWithEffectSource", "Flip", "FrontSide", "FullyUnlocked",
+            "HasCounters", "HasDevoured", "Historic", "IsCommander", "IsGoaded", "IsImprinted", "IsMonstrous",
+            "IsNotChosenType", "IsPrepared", "IsRemembered", "IsRenowned", "IsRingbearer", "IsSaddled",
+            "IsSolved", "IsSuspected", "IsTriggerRemembered", "IsUnearthed", "NameNotEnchantingEnchantedPlayer",
+            "NamedByRememberedPlayer", "NamedCard", "NoAbilities", "NotedColor", "NotedGuessPhantasm",
+            "NotedNameAetherSearcher", "NotedNameNobleBanneret", "NotedNameSmugglerCaptain", "NotedType",
+            "NotedTypes", "Outlaw", "Party", "Permanent", "PromisedGift", "SaddledThisTurn", "SharesCMCWith",
+            "SharesColorWith", "Split", "TargetedPlayerCtrl", "TargetedPlayerOwn", "Teamwork", "ThisTurnCast",
+            "ThisTurnEntered", "TopLibrary", "Transformed", "VisitedThisTurn", "Worthy",
+            "attackedBySourceThisCombat", "attackedOrBlockedSinceYourLastUpkeep", "attackersBandedWith",
+            "attacking", "attackingBattle", "attackingSame", "attackingYou", "bargained", "blitzed", "blocked",
+            "blockedOrBeenBlockedSinceYourLastUpkeep", "blockedThisCombat", "canBeBeamedUp", "canBeTurnedFaceUp",
+            "canProduceMana", "canProduceSameManaTypeWith", "castKeyword", "cloaked", "cmcChosenEvenOdd",
+            "cmcEven", "cmcNotChosenEvenOdd", "cmcOdd", "couldAttackButNotAttacking", "dashed",
+            "doesNotShareNameWith", "escaped", "evoked", "foretold", "hadToAttackThisCombat", "harnessed",
+            "hasABasicLandType", "hasANonBasicLandType", "hasManaAbility", "hasNonManaActivatedAbility",
+            "impended", "isDamaged", "kicked", "linkedCastSA", "manifested", "milledThisTurn", "noName",
+            "nonChosenCard", "powerEven", "powerGTbasePower", "powerGTtoughness", "powerLTtoughness",
+            "powerNOTbasePower", "powerOdd", "prowled", "sharesCardTypeWith", "sharesControllerWith",
+            "sharesCreatureTypeWith", "sharesNameWith", "sharesOwnerWith", "sharesPermanentTypeWith", "sneaked",
+            "spectacle", "surged", "surveilledThisTurn", "targetedBy", "warped", "wasDealtNonCombatDamageThisTurn",
+            "webSlinged");
+    /** The property prefixes the same two methods match with {@code startsWith}. */
+    private static final Set<String> CARD_PROPERTY_PREFIX = ImmutableSortedSet.of(
+            "Above", "ActivePlayerCtrl", "AllColors", "AnyChosenColor", "AttachedBy", "AttachedTo", "BorderColor",
+            "Bottom", "BottomGraveyard", "BottomLibrary", "CanBeAttachedBy", "CanBeEnchantedBy", "CanBeTargetedBy",
+            "CanEnchant", "CardUID_", "CastSa", "ChosenCard", "ChosenColor", "ChosenCtrl", "ChosenMode", "Cloned",
+            "ControlledBy", "ControllerControls", "Damaged", "DamagedBy", "DefenderCtrl", "DefendingPlayer",
+            "DirectlyAbove", "DrawnThisTurn", "Enchanted", "EnchantedBy", "EnchantedController", "EnchantedPlayer",
+            "EnemyColor", "EnteredUnder", "EquippedBy", "ExiledByYou", "ExiledWithSource", "ExiledWithSourceLKI",
+            "FortifiedBy", "FoughtThisTurn", "HasSVar", "HauntedBy", "ManaCost", "MonoColor", "MostProminentColor",
+            "MostProminentCreatureTypeInLibrary", "MultiColor", "NotDefined", "NotedFor", "OppCtrl", "OppOwn",
+            "OppProtect", "Other", "OwnedBy", "OwnerDoesntControl", "Paired", "ProtectedBy", "RememberedPlayer",
+            "SecondSpellCastThisTurn", "Self", "SharesCMCWith", "SharesColorWith", "SharesColorWithOther",
+            "StrictlyOther", "StrictlySelf", "ThisTurnEntered", "ThisTurnEnteredFrom", "TopGraveyard",
+            "TopGraveyardCreature", "TopLibrary", "Triggered", "YouCtrl", "YouDontCtrl", "YouDontOwn", "YouOwn",
+            "YourTeamCtrl", "activated", "attackedBattleThisTurn", "attackedLastTurn", "attackedThisCombat",
+            "attackedThisTurn", "attackedYouThisTurn", "attacking", "attackingYouOrYourPW", "basePower",
+            "baseToughness", "blockedByRemembered", "blockedBySource", "blockedBySourceLKI",
+            "blockedBySourceThisTurn", "blockedByThisTurn", "blockedByValidThisTurn", "blockedRemembered",
+            "blockedThisTurn", "blockedValidThisTurn", "blocking", "cameUnderControlSinceLastUpkeep",
+            "canProduceManaColor", "canReceiveCounters", "cmc", "convoked", "copiedSpell", "counters",
+            "dealtCombatDamageThisCombat", "dealtCombatDamageThisTurn", "dealtCombatDamagetoAny",
+            "dealtDamageThisTurn", "dealtDamageToOppThisTurn", "dealtDamageToYouThisTurn", "dealtDamagetoAny",
+            "delved", "doesNotShareNameWith", "enchanted", "enchanting", "enlistedThisCombat", "equalPT",
+            "equipped", "equipping", "exploited", "faceDown", "faceUp", "firstTurnControlled", "gotBlockedThisTurn",
+            "greatestCMC_", "greatestPower", "greatestRememberedCMC", "hasAbility", "hasKeyword", "hasXCost",
+            "inRealZone", "inZone", "isBlockedByRemembered", "kicked", "leastPower", "leastToughness",
+            "lowestCMC", "lowestRememberedCMC", "madness", "modified", "named", "notExertedThisTurn",
+            "notTributed", "numColors", "numTypes", "phasedIn", "phasedOut", "power", "sameName", "set",
+            "sharesAllCardTypesWithOther", "sharesBlockingAssignmentWith", "sharesCardTypeWith",
+            "sharesCardTypeWithOther", "sharesControllerWith", "sharesCreatureTypeWith", "sharesLandTypeWith",
+            "sharesNameWith", "sharesOwnerWith", "startedTheTurnUntapped", "suspended", "tapped", "token",
+            "totalPT", "toughness", "turnedFaceUpThisTurn", "unblocked", "untapped", "wasCast", "wasCastFrom",
+            "wasDealtDamageByThisGame", "wasDealtDamageThisTurn", "wasDealtExcessDamageThisTurn", "with", "without",
+            "yardGreatestPower");
+    /** The prefixes {@code CardProperty} follows with a two-letter comparator and an operand ({@code powerGE3}). */
+    private static final Set<String> COMPARISON_PREFIX = ImmutableSortedSet.of(
+            "basePower", "baseToughness", "cmc", "numColors", "numTypes", "power", "totalPT", "toughness");
+    /** The comparator words {@code Expressions.compare} knows. */
+    private static final Set<String> COMPARATORS = ImmutableSortedSet.of("EQ", "GE", "GT", "LE", "LT", "M2", "NE");
+
+    /**
+     * One {@code +}-separated card restriction: a named property, a color (with the {@code non} and
+     * {@code Source} decorations {@code CardStateProperty} reads), or, as the game's last resort, a type.
+     */
     private static boolean isValidExclusive(String valid) {
-        if (valid.charAt(0) == '!') {
+        if (valid.startsWith("!")) {
             valid = valid.substring(1);
         }
-        if (VALID_EXCLUSIVE.contains(valid)) {
+        if (valid.isEmpty()) {
+            return false;
+        }
+        if (CARD_PROPERTY.contains(valid)) {
             return true;
         }
-        return VALID_EXCLUSIVE_STARTSWITH.stream().anyMatch(startsWith(valid));
+        for (final String prefix : COMPARISON_PREFIX) {
+            if (valid.startsWith(prefix)) {
+                // CardProperty slices the comparator at prefix + 2 and the operand after it, so "power" alone is a
+                // StringIndexOutOfBoundsException the first time the filter runs and "powerful" a filter that never matches
+                final String rest = valid.substring(prefix.length());
+                return rest.length() > 2 && COMPARATORS.contains(rest.substring(0, 2));
+            }
+        }
+        if (CARD_PROPERTY_PREFIX.stream().anyMatch(startsWith(valid))) {
+            return true;
+        }
+        String plain = valid.startsWith("non") ? valid.substring("non".length()) : valid;
+        if (plain.endsWith("Source") && plain.length() > "Source".length()) {
+            plain = plain.substring(0, plain.length() - "Source".length());
+        }
+        if (plain.equals("Colorless") || MagicColor.fromName(plain) != 0) {
+            return true;
+        }
+        return isSingleTypeLegal(plain);
     }
 
     private static final class KeyValuePair {
