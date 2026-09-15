@@ -29,6 +29,7 @@ import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.PrintWriter;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.util.Enumeration;
 import java.util.HashMap;
 import java.util.Locale;
@@ -133,6 +134,22 @@ public final class CardScriptInfo {
             lastError = ex.toString();
             System.err.println("Problem writing file - " + file);
             ex.printStackTrace();
+            return false;
+        }
+    }
+
+    /** Deletes {@link #getFile()}. Returns false and records {@link #getLastError()} on failure. */
+    public boolean deleteFile() {
+        if (file == null) {
+            lastError = "no file";
+            return false;
+        }
+        lastError = null;
+        try {
+            Files.delete(file.toPath());
+            return true;
+        } catch (final IOException | SecurityException ex) {
+            lastError = ex.toString();
             return false;
         }
     }

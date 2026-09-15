@@ -211,9 +211,14 @@ public enum CCardScript implements ICDoc {
         return false;
     }
 
-    /** Rebuilds the cached UI Card of every printing of this name, so the detail panel and every open view read the new rules. */
+    /**
+     * Refreshes every printing of this name after its rules were re-read in place: the cached image
+     * keys (the alt key embeds the back face's name, which the saved script may have changed) and the
+     * cached UI Card, so a stale Card under an equal PaperCard key from an earlier delete/rename is gone.
+     */
     static void refreshCachedCards(final CardDb cardDb, final String name) {
         for (final PaperCard printing : cardDb.getAllCards(name)) {
+            printing.resetImageKeys();
             Card.updateCard(printing);
         }
     }

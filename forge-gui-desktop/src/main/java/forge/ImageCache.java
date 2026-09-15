@@ -50,6 +50,7 @@ import forge.gui.FThreads;
 import forge.gui.GuiBase;
 import forge.item.IPaperCard;
 import forge.item.InventoryItem;
+import forge.item.PaperCard;
 import forge.localinstance.properties.ForgeConstants;
 import forge.util.SleeveArt;
 import forge.localinstance.properties.ForgePreferences;
@@ -138,6 +139,56 @@ public class ImageCache {
         _CACHE.invalidateAll();
         _missingIconKeys.clear();
         ImageKeys.clearMissingCards();
+    }
+
+    /**
+     * Forget every cached image and image lookup for ONE printing after its art file changed on
+     * disk, so the next paint reads the new file. Targeted on purpose: {@link #clear()} would
+     * evict every scaled image in the process (deck editor thumbnails, match zones, the shared
+     * __DEFAULT__ scales) and every negative lookup. Also refreshes the card's transient hasImage
+     * flag. Runs on the EDT, where {@link #scaleImage} also resamples and caches synchronously, so
+     * nothing scaled from the old file can land in the cache after this returns.
+     */
+    public static void invalidate(final PaperCard pc) {
+        FThreads.assertExecutedByEdt(true);
+        if (pc == null) {
+            return;
+        }
+        final java.util.List<String> fileKeys = new java.util.ArrayList<>();
+        fileKeys.add(pc.getCardImageKey());
+        if (pc.hasBackFace()) {
+            fileKeys.add(pc.getCardAltImageKey());
+        }
+        final java.util.List<String> prefixes = new java.util.ArrayList<>();
+        for (final String key : fileKeys) {
+            if (StringUtils.isEmpty(key)) {
+                continue;
+            }
+            // the ORIGINAL is cached under the file key ("SET/Name.full"); the .artcrop variant is a
+            // separate key in ImageKeys' file cache and in _CACHE
+            final String artcrop = TextUtil.fastReplace(key, ".full", ".artcrop");
+            ImageKeys.forgetCardImage(key, pc.getEdition());
+            ImageKeys.forgetCardImage(artcrop, pc.getEdition());
+            _CACHE.invalidate(key);
+            _CACHE.invalidate(artcrop);
+            // a caller that hands scaleImage the file key itself (GuiDesktop's deck icon) caches its
+            // scale as "SET/Name.full#WxH"
+            prefixes.add(key + "#");
+            prefixes.add(artcrop + "#");
+        }
+        // every other SCALED copy is keyed by the ITEM key scaleImage was handed ("c:Name|SET|art",
+        // with "$alt" / "$wspec"... appended for the other faces) followed by "#WxH" - see scaleImage
+        // and ImageView's getImage(item, w, h, alt). That includes the FCardImageRenderer placeholder
+        // a card with no art gets while the online fetcher is off.
+        final String itemKey = pc.getImageKey(false);
+        if (!StringUtils.isEmpty(itemKey)) {
+            prefixes.add(itemKey + "#");
+            prefixes.add(itemKey + "$");
+        }
+        if (!prefixes.isEmpty()) {
+            _CACHE.asMap().keySet().removeIf(k -> prefixes.stream().anyMatch(k::startsWith));
+        }
+        pc.hasImage(true);
     }
 
     /**
