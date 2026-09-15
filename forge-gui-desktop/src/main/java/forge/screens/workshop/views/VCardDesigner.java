@@ -1,9 +1,6 @@
 package forge.screens.workshop.views;
 
-import java.awt.Dimension;
-
 import javax.swing.JPanel;
-import javax.swing.SpringLayout;
 
 import forge.gui.framework.DragCell;
 import forge.gui.framework.DragTab;
@@ -13,9 +10,11 @@ import forge.localinstance.skin.FSkinProp;
 import forge.screens.workshop.controllers.CCardDesigner;
 import forge.toolbox.FLabel;
 import forge.toolbox.FSkin;
+import forge.toolbox.FTextArea;
 import forge.util.Localizer;
+import net.miginfocom.swing.MigLayout;
 
-/** 
+/**
  * Assembles Swing components of workshop card designer tab.
  *
  * <br><br><i>(V at beginning of class name denotes a view class.)</i>
@@ -27,20 +26,28 @@ public enum VCardDesigner implements IVDoc<CCardDesigner> {
     // Fields used with interface IVDoc
     private DragCell parentCell;
     private final DragTab tab = new DragTab(Localizer.getInstance().getMessage("lblCardDesigner"));
-    
-    private FLabel btnSaveCard = new FLabel.Builder()
-    		.opaque(true).hoverable(true)
-    		.text(Localizer.getInstance().getMessage("lblSaveAndApplyCardChanges"))
-    		.icon(FSkin.getIcon(FSkinProp.ICO_SAVE))
-    		.enabled(false) //disabled by default until card changes made
-    		.build();
+
+    private final FTextArea txtStatus = new FTextArea();
+
+    private final FLabel btnSaveCard = new FLabel.Builder()
+            .opaque(true).hoverable(true)
+            .text(Localizer.getInstance().getMessage("lblSaveAndApplyCardChanges"))
+            .icon(FSkin.getIcon(FSkinProp.ICO_SAVE))
+            .enabled(false) //disabled by default until card changes made
+            .build();
 
     //========== Constructor
     VCardDesigner() {
+        txtStatus.setRows(6); //a wrapped text area otherwise reports a one-line preferred height
     }
-    
+
     public FLabel getBtnSaveCard() {
-    	return btnSaveCard;
+        return btnSaveCard;
+    }
+
+    /** Where the current script comes from and what a save does to it. */
+    public FTextArea getTxtStatus() {
+        return txtStatus;
     }
 
     //========== Overridden methods
@@ -90,15 +97,9 @@ public enum VCardDesigner implements IVDoc<CCardDesigner> {
      */
     @Override
     public void populate() {
-    	JPanel body = parentCell.getBody();
-    	SpringLayout layout = new SpringLayout();
-    	body.setLayout(layout);
-        layout.putConstraint(SpringLayout.SOUTH, btnSaveCard, -6, SpringLayout.SOUTH, body);
-        layout.putConstraint(SpringLayout.WEST, btnSaveCard, 6, SpringLayout.WEST, body);
-        layout.putConstraint(SpringLayout.EAST, btnSaveCard, -6, SpringLayout.EAST, body);
-        btnSaveCard.setPreferredSize(new Dimension(60, 30));
-        body.add(btnSaveCard);
-    	//body.setLayout(new MigLayout("insets 1, gap 0, wrap"));
-        //body.add(btnSaveCard, "w 100% - 12, h 30px!, ay bottom, gap 6");
+        final JPanel body = parentCell.getBody();
+        body.setLayout(new MigLayout("insets 6, gap 4, wrap 1, fillx"));
+        body.add(txtStatus, "growx, wmin 10"); //wmin: a long path must wrap, not widen the cell
+        body.add(btnSaveCard, "growx, h 30!, pushy, aligny bottom");
     }
 }

@@ -1,6 +1,6 @@
 package forge.screens.workshop.controllers;
 
-import java.util.Arrays;
+import java.io.File;
 import java.util.Map.Entry;
 
 import javax.swing.JTextPane;
@@ -9,17 +9,26 @@ import javax.swing.event.DocumentListener;
 import javax.swing.text.Style;
 import javax.swing.text.StyledDocument;
 
+import org.apache.commons.lang3.StringUtils;
+import org.apache.commons.lang3.exception.ExceptionUtils;
+
 import com.google.common.collect.ImmutableList;
 
 import forge.Singletons;
+import forge.StaticData;
 import forge.card.CardDb;
 import forge.card.CardRules;
 import forge.game.card.Card;
+import forge.gamemodes.net.server.FServerManager;
 import forge.gui.card.CardScriptInfo;
+import forge.gui.card.CardScriptProbe;
+import forge.gui.card.CardScriptInfo.Source;
 import forge.gui.card.CardScriptParser;
 import forge.gui.framework.FScreen;
 import forge.gui.framework.ICDoc;
 import forge.item.PaperCard;
+import forge.itemmanager.CardManager;
+import forge.localinstance.properties.ForgeConstants;
 import forge.localinstance.properties.ForgePreferences.FPref;
 import forge.model.FModel;
 import forge.screens.workshop.menus.WorkshopFileMenu;
@@ -75,6 +84,10 @@ public enum CCardScript implements ICDoc {
         return currentCard;
     }
 
+    public CardScriptInfo getCurrentScriptInfo() {
+        return currentScriptInfo;
+    }
+
     public void showCard(final PaperCard card) {
         if (currentCard == card || switchInProgress) { return; }
 
@@ -83,14 +96,45 @@ public enum CCardScript implements ICDoc {
             return;
         }
 
+        final CardManager catalog = VWorkshopCatalog.SINGLETON_INSTANCE.getCardManager();
+        if (card != null && catalog.getSelectedItem() != card) {
+            //the Save option above renamed the previous card and moved the selection (and the picture) to it:
+            //put both back on the card the user clicked, or three panels would show two different cards
+            switchInProgress = true;
+            try {
+                catalog.setSelectedItem(card); //the selection listener re-shows the picture and returns here early
+            } finally {
+                switchInProgress = false;
+            }
+        }
         currentCard = card;
-        currentScriptInfo = card != null ? CardScriptInfo.getScriptFor(currentCard.getRules().getNormalizedName()) : null;
+        currentScriptInfo = card != null ? resolveScript(card) : null;
         refresh();
+    }
+
+    private static CardScriptInfo resolveScript(final PaperCard card) {
+        String stem = card.getRules().getNormalizedName();
+        if (StringUtils.isBlank(stem)) {
+            stem = CardScriptInfo.toFileStem(card.getName());
+        }
+        if (StringUtils.isBlank(stem)) {
+            return null;
+        }
+        return CardScriptInfo.getScriptFor(stem, card.getName());
     }
 
     public void refresh() {
         if (refreshing) { return; }
         refreshing = true;
+        try {
+            refreshScript();
+        } finally {
+            refreshing = false; //left set, every later edit would read as not dirty: Save disabled, no switch-away prompt
+        }
+        CCardDesigner.SINGLETON_INSTANCE.refreshFor(currentCard, currentScriptInfo);
+    }
+
+    private void refreshScript() {
         final JTextPane txtScript = VCardScript.SINGLETON_INSTANCE.getTxtScript();
         txtScript.setText(currentScriptInfo != null ? currentScriptInfo.getText() : "");
         txtScript.setEditable(currentScriptInfo != null && currentScriptInfo.canEdit());
@@ -101,11 +145,16 @@ public enum CCardScript implements ICDoc {
         final Style empty = VCardScript.SINGLETON_INSTANCE.getEmptyStyle();
         doc.setCharacterAttributes(0, 9999, empty, true);
         if (FModel.getPreferences().getPrefBoolean(FPref.DEV_WORKSHOP_SYNTAX) && currentScriptInfo != null) {
-            for (final Entry<Integer, Integer> region : new CardScriptParser(currentScriptInfo.getText()).getErrorRegions().entrySet()) {
-                doc.setCharacterAttributes(region.getKey(), region.getValue(), error, true);
+            try {
+                for (final Entry<Integer, Integer> region : new CardScriptParser(currentScriptInfo.getText()).getErrorRegions().entrySet()) {
+                    doc.setCharacterAttributes(region.getKey(), region.getValue(), error, true);
+                }
+            } catch (final RuntimeException ex) {
+                //the highlighter is a heuristic and can throw on what the user typed (a bare "SVar:X" line beside a
+                //well-formed SVar:X that an ability references): the script is shown unhighlighted instead
+                System.err.println("Workshop: syntax highlighting failed: " + ex);
             }
         }
-        refreshing = false;
     }
 
     public boolean hasChanges() {
@@ -140,30 +189,180 @@ public enum CCardScript implements ICDoc {
         return true;
     }
 
+    private static String msg(final String key, final Object... args) {
+        return Localizer.getInstance().getMessage(key, args);
+    }
+
+    private static String rootMessage(final Throwable ex) {
+        final String root = ExceptionUtils.getRootCauseMessage(ex);
+        return StringUtils.isBlank(root) ? String.valueOf(ex) : root;
+    }
+
+    /**
+     * True when a name cannot be a Workshop card's: it has no file stem, holds the set separator, or
+     * holds a backslash, which the picture key built from the name keeps and Windows reads as a path
+     * separator.
+     */
+    public static boolean isNameUnusable(final String name, final String stem) {
+        return stem.isEmpty() || name.indexOf(CardDb.NameSetSeparator) >= 0 || name.indexOf('\\') >= 0;
+    }
+
+    /** True when either database already knows a card by this name, including filtered stock cards and alternate names. */
+    public static boolean isNameTaken(final String name) {
+        final StaticData db = FModel.getMagicDb();
+        return db.getCommonCards().contains(name) || db.getVariantCards().contains(name)
+                || db.getCommonCards().getRules(name, true) != null || db.getVariantCards().getRules(name, true) != null;
+    }
+
+    /**
+     * Shows the refusal and returns true while any match is running: a hosted network match (the
+     * card database is shared with every connected player, the same guard the developer-mode
+     * checkbox applies) or a local one (every live Card reads the CardRules object that a save
+     * reinitializes in place, so a card the game builds later - a copy, a cascade, a wish - would be
+     * built from the new text while the ones already in play keep the old abilities).
+     */
+    public static boolean refuseIfNetworkMatchActive() {
+        if (FServerManager.getInstance().isMatchActive() || !Singletons.getControl().getCurrentMatches().isEmpty()) {
+            FOptionPane.showErrorDialog(msg("lblWorkshopSaveRefusedNetworkMatch"));
+            return true;
+        }
+        return false;
+    }
+
+    /** Rebuilds the cached UI Card of every printing of this name, so the detail panel and every open view read the new rules. */
+    static void refreshCachedCards(final CardDb cardDb, final String name) {
+        for (final PaperCard printing : cardDb.getAllCards(name)) {
+            Card.updateCard(printing);
+        }
+    }
+
     public boolean saveChanges() {
         if (!hasChanges()) { return true; } //not need if text hasn't been changed
+        if (refuseIfNetworkMatchActive()) { return false; }
 
         final String text = VCardScript.SINGLETON_INSTANCE.getTxtScript().getText();
-        if (!currentScriptInfo.trySetText(text)) {
+        final CardScriptInfo info = currentScriptInfo;
+        final String oldName = currentCard.getName();
+
+        // 1. the rules reader must accept it, and every face must be in the script itself
+        CardRules newRules;
+        try {
+            newRules = CardScriptProbe.parseRules(text, info.getStem());
+        } catch (final Exception ex) {
+            FOptionPane.showErrorDialog(msg("lblWorkshopRulesRefused", rootMessage(ex)));
+            return false;
+        }
+        if (CardScriptProbe.usesCopyFaceFrom(text)) {
+            //the borrowed face is only supplied by the database at load time, so neither the probe nor the name is available here
+            FOptionPane.showErrorDialog(msg("lblWorkshopCopyFaceRefused"));
+            return false;
+        }
+        if (!CardScriptProbe.hasAllFaces(newRules) || StringUtils.isBlank(newRules.getName())) {
+            FOptionPane.showErrorDialog(msg("lblWorkshopRulesRefused", msg("lblWorkshopFaceMissing")));
             return false;
         }
 
-        updateDirtyFlag();
-
-        final String oldName = currentCard.getName();
-
-        final CardRules newRules = CardRules.fromScript(Arrays.asList(text.split("\n")));
-        final CardDb cardDb = newRules.isVariant() ? FModel.getMagicDb().getVariantCards() :
-            FModel.getMagicDb().getCommonCards();
-
-        cardDb.getEditor().putCard(newRules);
-        if (newRules.getName().equals(oldName)) {
-            Card.updateCard(currentCard);
-        } else {
-            currentCard = cardDb.getCard(newRules.getName());
+        // 2. a real Card must build from it (this is what catches unknown ApiTypes and missing SVars)
+        try {
+            CardScriptProbe.probeCard(newRules, currentCard.getEdition(), currentCard.getRarity());
+        } catch (final Exception | AssertionError | StackOverflowError ex) {
+            FOptionPane.showErrorDialog(msg("lblWorkshopCardRefused", rootMessage(ex)));
+            return false;
         }
 
-        VWorkshopCatalog.SINGLETON_INSTANCE.getCardManager().repaint();
+        // 3. the card must stay in the database it lives in
+        if (newRules.isVariant() != currentCard.getRules().isVariant()) {
+            FOptionPane.showErrorDialog(msg("lblWorkshopVariantSwitchRefused"));
+            return false;
+        }
+
+        // 4. a rename creates a new custom card; the original is left as it was
+        final String newName = newRules.getName();
+        final boolean renamed = !newName.equals(oldName);
+        CardScriptInfo target = info;
+        if (!renamed && info.getSource() == Source.STOCK_ZIP
+                && !FModel.getPreferences().getPrefBoolean(FPref.ALLOW_CUSTOM_CARDS_IN_DECKS_CONFORMANCE)
+                && !FOptionPane.showConfirmDialog(msg("lblWorkshopOverrideConfirm", oldName), msg("lblSaveAndApplyCardChanges"))) {
+            //the first override of a stock card changes how the card loads (custom => deck conformance, no art fetch): say so once
+            return false;
+        }
+        if (renamed) {
+            final String newStem = CardScriptInfo.toFileStem(newName);
+            if (isNameUnusable(newName, newStem)) {
+                FOptionPane.showErrorDialog(msg("lblWorkshopNameInvalid"));
+                return false;
+            }
+            if (isNameTaken(newName)) {
+                FOptionPane.showErrorDialog(msg("lblWorkshopNameTaken", newName));
+                return false;
+            }
+            if (CardScriptInfo.readStockScript(newStem) != null) {
+                //"Foo-Bar" and "Foo Bar" share the stem foo_bar: the file would load as an override of the stock card
+                FOptionPane.showErrorDialog(msg("lblWorkshopStemTaken", newStem));
+                return false;
+            }
+            target = CardScriptInfo.customTargetFor(newStem);
+            //the reader keys loaded scripts by stem, so a same-stem file ANYWHERE under custom/cards would collide at the next start
+            final File sameStem = target.getFile().exists() ? target.getFile()
+                    : CardScriptInfo.findCustomFile(new File(ForgeConstants.USER_CUSTOM_CARDS_DIR), newStem + ".txt");
+            if (sameStem != null) {
+                FOptionPane.showErrorDialog(msg("lblWorkshopFileExists", sameStem.getPath()));
+                return false;
+            }
+            if (!FOptionPane.showConfirmDialog(msg("lblWorkshopRenameConfirm", oldName, newName), msg("lblSaveAndApplyCardChanges"))) {
+                return false;
+            }
+            newRules = CardScriptProbe.parseRules(text, newStem);
+            newRules.setCustom();
+            newRules.setPath(target.getFile().getPath());
+        } else {
+            //a loose res/cardsfolder file keeps its path and stays a stock card; everything else is a user file and loads as custom
+            newRules.setPath(info.getFile().getPath());
+            if (info.getSource() != Source.STOCK_FILE) {
+                newRules.setCustom();
+            }
+        }
+
+        // 5. write
+        if (!target.trySetText(text)) {
+            FOptionPane.showErrorDialog(msg("lblWorkshopWriteFailed", String.valueOf(target.getLastError())));
+            return false;
+        }
+
+        // 6. apply in memory
+        final CardDb cardDb = newRules.isVariant() ? FModel.getMagicDb().getVariantCards() : FModel.getMagicDb().getCommonCards();
+        final CardManager catalog = VWorkshopCatalog.SINGLETON_INSTANCE.getCardManager();
+        if (!renamed) {
+            cardDb.getEditor().putCard(newRules); //reinitializes the existing rules object in place
+            refreshCachedCards(cardDb, oldName);
+        } else {
+            switchInProgress = true; //catalog mutations fire selection events; state is set by hand below
+            try {
+                cardDb.getEditor().putCard(newRules);
+                final PaperCard renamedCard = cardDb.getCard(newName);
+                if (renamedCard == null) {
+                    FOptionPane.showErrorDialog(msg("lblWorkshopRulesRefused", newName));
+                    return false;
+                }
+                refreshCachedCards(cardDb, newName);
+                CardScriptInfo.register(target.getStem(), target);
+                currentCard = renamedCard;
+                catalog.addItem(renamedCard, 1);
+                if (catalog.getSelectedItem() != renamedCard) {
+                    catalog.resetFilters();
+                    catalog.setSelectedItem(renamedCard);
+                }
+                catalog.scrollSelectionIntoView();
+            } finally {
+                switchInProgress = false;
+            }
+        }
+
+        CardScriptInfo.register(target.getStem(), target);
+        currentScriptInfo = target;
+        updateDirtyFlag();
+
+        catalog.repaint();
         VWorkshopCatalog.SINGLETON_INSTANCE.getCDetailPicture().showItem(currentCard);
         refresh();
         return true;
