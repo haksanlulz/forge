@@ -1370,6 +1370,14 @@ public final class CardDb implements ICardDatabase, IDeckGenPool {
             }
 
             result = rulesByPrimaryName.put(cardName, rules);
+            // index the faces as addCard does for a card loaded at start; a card added at runtime (a
+            // Workshop rename) was otherwise retrievable by name only until the next start
+            for (ICardFace face : rules.getAllFaces()) {
+                addFaceToDbNames(face, rules);
+            }
+            if (rules.hasFunctionalVariants()) {
+                cacheRuleFlavorNames(rules);
+            }
 
             // 1. generate all paper cards from edition data we have (either explicit, or found in res/editions, or add to unknown edition)
             List<PaperCard> paperCards = new ArrayList<>();
@@ -1404,7 +1412,8 @@ public final class CardDb implements ICardDatabase, IDeckGenPool {
                 }
             }
             if (paperCards.isEmpty()) {
-                paperCards.add(new PaperCard(rules, CardEdition.UNKNOWN_CODE, CardRarity.Special));
+                // same fallback as initialize(): a custom card with no edition entry lives in the USER bucket
+                paperCards.add(new PaperCard(rules, rules.isCustom() ? "USER" : CardEdition.UNKNOWN_CODE, CardRarity.Special));
             }
             // 2. add them to db
             for (PaperCard paperCard : paperCards) {

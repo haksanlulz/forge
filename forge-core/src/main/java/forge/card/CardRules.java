@@ -97,6 +97,11 @@ public final class CardRules implements ICardCharacteristics {
         partnerWith = newRules.partnerWith;
         setColorID = newRules.setColorID;
         tokens = newRules.tokens;
+        // where the script now lives and whether it is a user file: a Workshop save turns a stock
+        // card into a custom override (and a revert turns it back), and every consumer of isCustom()
+        // (deck conformance, the image fetcher, advanced search) reads the live object, not the copy
+        custom = newRules.custom;
+        path = newRules.path;
     }
 
     private static ColorSet calculateColorIdentity(CardRules rules) {
