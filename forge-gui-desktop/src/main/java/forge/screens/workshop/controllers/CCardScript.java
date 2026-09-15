@@ -1,7 +1,5 @@
 package forge.screens.workshop.controllers;
 
-import java.awt.event.FocusEvent;
-import java.awt.event.FocusListener;
 import java.util.Arrays;
 import java.util.Map.Entry;
 
@@ -61,15 +59,10 @@ public enum CCardScript implements ICDoc {
                 //Plain text components do not fire these events
             }
         });
-        VCardScript.SINGLETON_INSTANCE.getTxtScript().addFocusListener(new FocusListener() {
-            @Override
-            public void focusLost(final FocusEvent e) {
-                refresh();
-            }
-            @Override
-            public void focusGained(final FocusEvent e) {
-            }
-        });
+        //No focus listener on the text pane: the one upstream had called refresh() on every permanent focus
+        //loss, and a click on the catalog table moves focus synchronously BEFORE the selection changes, so
+        //the edit was overwritten with the saved text (clearing the dirty flag) and the switch-away prompt
+        //in showCard never fired for the mouse. The dirty flag and canSwitchAway() are the whole contract.
     }
 
     private void updateDirtyFlag() {
@@ -77,7 +70,7 @@ public enum CCardScript implements ICDoc {
         if (isTextDirty == isTextNowDirty) { return; }
         isTextDirty = isTextNowDirty;
         VCardDesigner.SINGLETON_INSTANCE.getBtnSaveCard().setEnabled(isTextNowDirty);
-        VCardScript.SINGLETON_INSTANCE.getTabLabel().setText((isTextNowDirty ? "*" : "") + "Card Script");
+        VCardScript.SINGLETON_INSTANCE.getTabLabel().setText((isTextNowDirty ? "*" : "") + Localizer.getInstance().getMessage("lblCardScript"));
         WorkshopFileMenu.updateSaveEnabled();
     }
 
