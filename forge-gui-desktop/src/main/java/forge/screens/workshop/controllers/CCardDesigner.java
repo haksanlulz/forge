@@ -28,6 +28,7 @@ import forge.screens.workshop.WorkshopFiles;
 import forge.screens.workshop.views.VCardDesigner;
 import forge.screens.workshop.views.VWorkshopCatalog;
 import forge.toolbox.FOptionPane;
+import forge.util.ItemPool;
 import forge.util.Localizer;
 
 /**
@@ -51,6 +52,8 @@ public enum CCardDesigner implements ICDoc {
         view.getBtnNewCard().setCommand((Runnable) this::newCard);
         view.getBtnSetArt().setCommand((Runnable) () -> setArt(false));
         view.getBtnSetBackArt().setCommand((Runnable) () -> setArt(true));
+        view.getBtnRevert().setCommand((Runnable) this::revertToStock);
+        view.getBtnDelete().setCommand((Runnable) this::deleteCustomCard);
     }
 
     private static String msg(final String key, final Object... args) {
@@ -93,6 +96,31 @@ public enum CCardDesigner implements ICDoc {
     private static boolean hasBackFaceArt(final PaperCard pc) {
         return pc != null && pc.hasBackFace() && pc.getRules().getSplitType() != CardSplitType.Flip
                 && !StringUtils.isBlank(pc.getCardAltImageKey());
+    }
+
+    /**
+     * Puts a printing into the catalog unless it is already listed. The catalog pool is unbounded
+     * and unique-by-name, so addItem on a listed printing would only raise its pool count.
+     */
+    private static void addToCatalog(final PaperCard printing) {
+        if (!catalog().getPool().contains(printing)) {
+            catalog().addItem(printing, 1);
+        }
+    }
+
+    /**
+     * Puts every printing of a stock card back into the catalog after its custom shadow was removed
+     * (removeItems took every printing out) and returns the first, or null when there is none.
+     */
+    private static PaperCard restoreToCatalog(final CardDb cardDb, final String name) {
+        PaperCard first = null;
+        for (final PaperCard printing : cardDb.getAllCardsNoAlt(name)) {
+            addToCatalog(printing);
+            if (first == null) {
+                first = printing;
+            }
+        }
+        return first;
     }
 
     /** Selects a card in the catalog, clearing the filters if they hide it. */
@@ -153,6 +181,8 @@ public enum CCardDesigner implements ICDoc {
         final Source source = info == null ? null : info.getSource();
         view.getBtnSetArt().setEnabled(!StringUtils.isBlank(imageKey));
         view.getBtnSetBackArt().setVisible(hasBackFaceArt(pc));
+        view.getBtnRevert().setVisible(source == Source.CUSTOM_OVERRIDE);
+        view.getBtnDelete().setVisible(source == Source.CUSTOM_CARD);
     }
 
     /** Prompts for a name, writes a template script under the custom cards dir, registers it and selects it. */
@@ -278,6 +308,128 @@ public enum CCardDesigner implements ICDoc {
         pictures().showItem(pc);
         catalog().repaint();
         refreshFor(pc, script().getCurrentScriptInfo());
+    }
+
+    /** Deletes the custom override of a stock card and puts the stock script back, in memory and in the pane. */
+    public void revertToStock() {
+        if (script().getCurrentScriptInfo() == null || script().getCurrentScriptInfo().getSource() != Source.CUSTOM_OVERRIDE
+                || !script().canSwitchAway(false) || CCardScript.refuseIfNetworkMatchActive()) {
+            return; //an unsaved edit gets the Save / Don't Save / Cancel prompt here too, never a silent discard
+        }
+        //read after the gate: its Save option can rename the current card
+        final PaperCard pc = script().getCurrentCard();
+        final CardScriptInfo info = script().getCurrentScriptInfo();
+        if (pc == null || info == null || info.getSource() != Source.CUSTOM_OVERRIDE) {
+            return;
+        }
+        final String stem = info.getStem();
+        final String stock = CardScriptInfo.readStockScript(stem);
+        if (stock == null) {
+            FOptionPane.showErrorDialog(msg("lblWorkshopStockUnreachable", String.valueOf(CardScriptInfo.getZipProblem())));
+            return;
+        }
+        final CardRules stockRules;
+        try {
+            stockRules = CardScriptProbe.parseRules(stock, stem); //the stock script must parse before the override is destroyed
+        } catch (final Exception ex) {
+            FOptionPane.showErrorDialog(msg("lblWorkshopStockUnreachable", rootMessage(ex)));
+            return;
+        }
+        if (!CardScriptProbe.hasAllFaces(stockRules)) {
+            //a CopyFaceFrom stock script gets its face from the database at load time; it cannot be rebuilt here
+            FOptionPane.showErrorDialog(msg("lblWorkshopStockUnreachable", msg("lblWorkshopCopyFaceRefused")));
+            return;
+        }
+        stockRules.setPath(CardScriptInfo.stockScriptPathFor(stem)); //custom stays false: the reinit copies both onto the live rules
+        if (!FOptionPane.showConfirmDialog(msg("lblWorkshopRevertConfirm", pc.getName(), String.valueOf(info.getFile())), msg("lblWorkshopRevertToStock"))) {
+            return;
+        }
+        if (!info.deleteFile()) {
+            FOptionPane.showErrorDialog(msg("lblWorkshopWriteFailed", String.valueOf(info.getLastError())));
+            return;
+        }
+        artNote = null;
+        artNoteCard = null;
+
+        if (stockRules.getName().equals(pc.getName()) && stockRules.isVariant() == pc.getRules().isVariant()) {
+            final CardDb cardDb = dbFor(stockRules);
+            cardDb.getEditor().putCard(stockRules); //same name: the existing rules object is reinitialized in place
+            CCardScript.refreshCachedCards(cardDb, pc.getName());
+            script().reloadCurrent(); //re-resolves to the stock source
+            pictures().showItem(pc);
+        } else {
+            //the override was renamed by hand: swap the custom entry for the stock one
+            script().discardCard();
+            final List<PaperCard> gone = dbFor(pc.getRules()).getEditor().removeCard(pc.getRules());
+            catalog().removeItems(ItemPool.createFrom(gone, PaperCard.class));
+            CardScriptInfo.forget(stem);
+            final CardDb cardDb = dbFor(stockRules);
+            cardDb.getEditor().putCard(stockRules);
+            CCardScript.refreshCachedCards(cardDb, stockRules.getName());
+            //a hand-renamed override never replaced the stock card at load (a different Name:), so the stock
+            //printings may still be listed: put back only what is missing, every printing of it
+            final PaperCard back = restoreToCatalog(cardDb, stockRules.getName());
+            if (back != null) {
+                select(back);
+                script().showCard(back);
+            }
+        }
+        catalog().repaint();
+    }
+
+    /** Deletes a card that exists only as a custom file, from disk, the database and the catalog. */
+    public void deleteCustomCard() {
+        final PaperCard pc = script().getCurrentCard();
+        final CardScriptInfo info = script().getCurrentScriptInfo();
+        if (pc == null || info == null || info.getSource() != Source.CUSTOM_CARD || CCardScript.refuseIfNetworkMatchActive()) {
+            return;
+        }
+        if (!FOptionPane.showConfirmDialog(msg("lblWorkshopDeleteConfirm", pc.getName(), String.valueOf(info.getFile())), msg("lblWorkshopDeleteCustomCard"), false)) {
+            return;
+        }
+        if (!info.deleteFile()) {
+            FOptionPane.showErrorDialog(msg("lblWorkshopWriteFailed", String.valueOf(info.getLastError())));
+            return;
+        }
+        artNote = null;
+        artNoteCard = null;
+        script().discardCard(); //nothing to save: the card is going away
+        final CardDb cardDb = dbFor(pc.getRules());
+        final List<PaperCard> gone = cardDb.getEditor().removeCard(pc.getRules());
+        catalog().removeItems(ItemPool.createFrom(gone, PaperCard.class)); //the list view re-selects a neighbour
+        CardScriptInfo.forget(info.getStem());
+        restoreShadowedStock(pc.getName(), info.getStem());
+        if (catalog().getSelectedItem() == null) {
+            script().showCard(null);
+        } else {
+            script().showCard(catalog().getSelectedItem());
+        }
+        catalog().repaint();
+    }
+
+    /**
+     * Puts back a stock card that a custom card of the same NAME shadowed from a different file (a DFC's
+     * stem joins both faces, so the exact stem misses it), as the next start would. For Delete Custom
+     * Card and for the rename of a custom card, which removes the original the same way.
+     */
+    void restoreShadowedStock(final String name, final String customStem) {
+        final String stockStem = CardScriptInfo.stockStemForName(name);
+        final String stock = stockStem == null || stockStem.equals(customStem) ? null : CardScriptInfo.readStockScript(stockStem);
+        if (stock == null) {
+            return;
+        }
+        try {
+            final CardRules stockRules = CardScriptProbe.parseRules(stock, stockStem);
+            if (CardScriptProbe.hasAllFaces(stockRules) && stockRules.getName().equals(name)) {
+                stockRules.setPath(CardScriptInfo.stockScriptPathFor(stockStem));
+                final CardDb stockDb = dbFor(stockRules);
+                stockDb.getEditor().putCard(stockRules);
+                CCardScript.refreshCachedCards(stockDb, name); //the custom card's printings were equal keys in Card's UI cache
+                restoreToCatalog(stockDb, name); //removeItems(gone) took every stock-edition printing out with the shadow
+            }
+        } catch (final Exception ex) {
+            System.err.println("Workshop: could not restore the stock " + name + " after removing the custom card: " + ex);
+        }
     }
 
     //========== Overridden methods

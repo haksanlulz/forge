@@ -30,8 +30,10 @@ import java.io.InputStreamReader;
 import java.io.PrintWriter;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.util.ArrayList;
 import java.util.Enumeration;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -194,6 +196,13 @@ public final class CardScriptInfo {
     public static String getZipProblem() {
         openStockZip();
         return zipProblem;
+    }
+
+    /** Drops the cached script for a stem, so the next lookup reads the disk again (after a delete or a revert). */
+    public static void forget(final String stem) {
+        if (stem != null) {
+            allScripts.remove(stem);
+        }
     }
 
     public static void register(final String stem, final CardScriptInfo info) {
@@ -365,6 +374,102 @@ public final class CardScriptInfo {
             return FileUtil.readFileToString(stockFile);
         }
         return readZipScript(stem);
+    }
+
+    /**
+     * The path the card reader records on a stock rules object for this stem: the loose file's path,
+     * else the zip entry name, else null. What {@code CardRules.getPath()} reads after a load.
+     */
+    public static String stockScriptPathFor(final String stem) {
+        if (stem == null || stem.isEmpty()) {
+            return null;
+        }
+        final File stockFile = looseStockFileFor(stem);
+        if (stockFile != null) {
+            return stockFile.getPath();
+        }
+        return stockZipEntryFor(stem);
+    }
+
+    /**
+     * The file stems the stock tree may use for a card name, most likely first: {@link #toFileStem},
+     * the card reader's own lazy-load transform (every run of non-alphanumerics becomes one
+     * underscore, so "A.I.M. Bot" is {@code a_i_m_bot}), and the rebalanced/ form that keeps the
+     * "A-" hyphen ({@code a-akki_ronin}). Candidates only: each is checked against the tree.
+     */
+    static List<String> stemCandidates(final String name) {
+        final List<String> out = new ArrayList<>();
+        final String plain = toFileStem(name);
+        if (!plain.isEmpty()) {
+            out.add(plain);
+        }
+        final StringBuilder reader = new StringBuilder();
+        for (final char ch : StringUtils.stripAccents(name).toLowerCase(Locale.ROOT).toCharArray()) {
+            if (ch == '\'') {
+                continue;
+            }
+            if ((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9')) {
+                reader.append(ch);
+            } else if (reader.length() > 0 && reader.charAt(reader.length() - 1) != '_') {
+                reader.append('_');
+            }
+        }
+        while (reader.length() > 0 && reader.charAt(reader.length() - 1) == '_') {
+            reader.setLength(reader.length() - 1);
+        }
+        if (reader.length() > 0 && !out.contains(reader.toString())) {
+            out.add(reader.toString());
+        }
+        final String hyphenKept = StringUtils.stripAccents(name).toLowerCase(Locale.ROOT)
+                .replaceAll("[^-a-z0-9_\\s]", "").replaceAll("\\s", "_").replaceAll("_+", "_");
+        if (!hyphenKept.isEmpty() && !out.contains(hyphenKept)) {
+            out.add(hyphenKept);
+        }
+        return out;
+    }
+
+    /**
+     * The stem of the stock script for a card NAME: a stem a script exists under (see
+     * {@link #stemCandidates}), else the reader's prefix match (a double-faced card's file name joins
+     * both faces, so {@code delver_of_secrets} lives in {@code delver_of_secrets_insectile_aberration.txt}),
+     * tried for every candidate in every stock folder, else null.
+     */
+    public static String stockStemForName(final String name) {
+        final List<String> candidates = stemCandidates(name);
+        if (candidates.isEmpty()) {
+            return null;
+        }
+        for (final String candidate : candidates) {
+            if (readStockScript(candidate) != null) {
+                return candidate;
+            }
+        }
+        final ZipFile zip = openStockZip();
+        for (final String candidate : candidates) {
+            final String prefix = candidate + "_"; // the joined DFC form only; "bin" must not find bind.txt
+            // first-letter folder, then upcoming/ and rebalanced/: 30 stock double-faced cards live in the latter two,
+            // and a rebalanced one needs the hyphen candidate as its prefix
+            for (final String folder : stockFoldersFor(candidate)) {
+                final String[] loose = new File(ForgeConstants.CARD_DATA_DIR, folder).list();
+                if (loose != null) {
+                    for (final String fileName : loose) {
+                        if (fileName.startsWith(prefix) && fileName.endsWith(EXT)) {
+                            return fileName.substring(0, fileName.length() - EXT.length());
+                        }
+                    }
+                }
+                if (zip != null) {
+                    final String entryPrefix = folder + "/" + prefix;
+                    for (final Enumeration<? extends ZipEntry> en = zip.entries(); en.hasMoreElements();) {
+                        final String entry = en.nextElement().getName();
+                        if (entry.startsWith(entryPrefix) && entry.endsWith(EXT)) {
+                            return entry.substring(folder.length() + 1, entry.length() - EXT.length());
+                        }
+                    }
+                }
+            }
+        }
+        return null;
     }
 
     /** The zip entry name a stock script for this stem is stored under, or null when the zip has none. */

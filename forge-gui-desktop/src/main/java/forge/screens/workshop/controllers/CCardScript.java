@@ -1,6 +1,7 @@
 package forge.screens.workshop.controllers;
 
 import java.io.File;
+import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
 
@@ -37,6 +38,7 @@ import forge.screens.workshop.views.VCardDesigner;
 import forge.screens.workshop.views.VCardScript;
 import forge.screens.workshop.views.VWorkshopCatalog;
 import forge.toolbox.FOptionPane;
+import forge.util.ItemPool;
 import forge.util.Localizer;
 
 /**
@@ -113,6 +115,22 @@ public enum CCardScript implements ICDoc {
         }
         currentCard = card;
         currentScriptInfo = card != null ? resolveScript(card) : null;
+        refresh();
+    }
+
+    /** Forgets the current card without offering to save: it is being deleted, so there is nothing to keep. */
+    public void discardCard() {
+        currentCard = null;
+        currentScriptInfo = null;
+        refresh();
+    }
+
+    /** Drops the cached script for the current card and reads it again from disk (after a revert or an external change). */
+    public void reloadCurrent() {
+        if (currentScriptInfo != null) {
+            CardScriptInfo.forget(currentScriptInfo.getStem());
+        }
+        currentScriptInfo = currentCard != null ? resolveScript(currentCard) : null;
         refresh();
     }
 
@@ -317,7 +335,9 @@ public enum CCardScript implements ICDoc {
                 FOptionPane.showErrorDialog(msg("lblWorkshopFileExists", sameStem.getPath()));
                 return false;
             }
-            if (!FOptionPane.showConfirmDialog(msg("lblWorkshopRenameConfirm", oldName, newName), msg("lblSaveAndApplyCardChanges"))) {
+            //a custom card has nothing to leave behind: its file and database entry go with the rename
+            final String renameConfirmKey = info.getSource() == Source.CUSTOM_CARD ? "lblWorkshopRenameConfirmRemoves" : "lblWorkshopRenameConfirm";
+            if (!FOptionPane.showConfirmDialog(msg(renameConfirmKey, oldName, newName), msg("lblSaveAndApplyCardChanges"))) {
                 return false;
             }
             newRules = CardScriptProbe.parseRules(text, newStem);
@@ -346,11 +366,25 @@ public enum CCardScript implements ICDoc {
         } else {
             switchInProgress = true; //catalog mutations fire selection events; state is set by hand below
             try {
+                final CardRules oldRules = currentCard.getRules();
                 cardDb.getEditor().putCard(newRules);
                 final PaperCard renamedCard = cardDb.getCard(newName);
                 if (renamedCard == null) {
+                    target.deleteFile(); //nothing was registered: leave no orphan file behind, and the original card untouched
                     FOptionPane.showErrorDialog(msg("lblWorkshopRulesRefused", newName));
                     return false;
+                }
+                if (info.getSource() == Source.CUSTOM_CARD) {
+                    //the new card is in: only now take the old one out, its file with it, and bring back a stock card
+                    //it shadowed by name, exactly as Delete Custom Card does
+                    final List<PaperCard> gone = cardDb.getEditor().removeCard(oldRules);
+                    catalog.removeItems(ItemPool.createFrom(gone, PaperCard.class));
+                    if (!info.deleteFile()) {
+                        FOptionPane.showErrorDialog(msg("lblWorkshopWriteFailed", String.valueOf(info.getLastError())));
+                    }
+                    CardScriptInfo.forget(info.getStem());
+                    CCardDesigner.SINGLETON_INSTANCE.restoreShadowedStock(oldName, info.getStem());
+                    cardDb.getEditor().reindexFaces(newRules); //an unchanged back face's alt-name entry went with the original
                 }
                 refreshCachedCards(cardDb, newName);
                 CardScriptInfo.register(target.getStem(), target);
