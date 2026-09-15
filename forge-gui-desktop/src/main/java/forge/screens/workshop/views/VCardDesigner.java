@@ -29,6 +29,10 @@ public enum VCardDesigner implements IVDoc<CCardDesigner> {
 
     private final FTextArea txtStatus = new FTextArea();
 
+    private final FLabel btnNewCard = button("lblWorkshopNewCard", FSkinProp.ICO_NEW);
+    private final FLabel btnSetArt = button("lblWorkshopSetArt", FSkinProp.ICO_OPEN);
+    private final FLabel btnSetBackArt = button("lblWorkshopSetBackArt", FSkinProp.ICO_OPEN);
+
     private final FLabel btnSaveCard = new FLabel.Builder()
             .opaque(true).hoverable(true)
             .text(Localizer.getInstance().getMessage("lblSaveAndApplyCardChanges"))
@@ -36,9 +40,19 @@ public enum VCardDesigner implements IVDoc<CCardDesigner> {
             .enabled(false) //disabled by default until card changes made
             .build();
 
+    private static FLabel button(final String key, final FSkinProp icon) {
+        return new FLabel.Builder()
+                .opaque(true).hoverable(true)
+                .text(Localizer.getInstance().getMessage(key))
+                .icon(FSkin.getIcon(icon))
+                .build();
+    }
+
     //========== Constructor
     VCardDesigner() {
-        txtStatus.setRows(6); //a wrapped text area otherwise reports a one-line preferred height
+        txtStatus.setRows(8); //a wrapped text area otherwise reports a one-line preferred height
+        btnSetArt.setEnabled(false);
+        btnSetBackArt.setVisible(false);
     }
 
     public FLabel getBtnSaveCard() {
@@ -48,6 +62,18 @@ public enum VCardDesigner implements IVDoc<CCardDesigner> {
     /** Where the current script comes from and what a save does to it. */
     public FTextArea getTxtStatus() {
         return txtStatus;
+    }
+
+    public FLabel getBtnNewCard() {
+        return btnNewCard;
+    }
+
+    public FLabel getBtnSetArt() {
+        return btnSetArt;
+    }
+
+    public FLabel getBtnSetBackArt() {
+        return btnSetBackArt;
     }
 
     //========== Overridden methods
@@ -98,8 +124,11 @@ public enum VCardDesigner implements IVDoc<CCardDesigner> {
     @Override
     public void populate() {
         final JPanel body = parentCell.getBody();
-        body.setLayout(new MigLayout("insets 6, gap 4, wrap 1, fillx"));
+        body.setLayout(new MigLayout("insets 6, gap 4, wrap 1, fillx, hidemode 3"));
         body.add(txtStatus, "growx, wmin 10"); //wmin: a long path must wrap, not widen the cell
+        body.add(btnNewCard, "growx, h 30!");
+        body.add(btnSetArt, "growx, h 30!");
+        body.add(btnSetBackArt, "growx, h 30!");
         body.add(btnSaveCard, "growx, h 30!, pushy, aligny bottom");
     }
 }

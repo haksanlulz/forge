@@ -149,6 +149,22 @@ public final class CardScriptInfo {
         }
     }
 
+    /** Deletes {@link #getFile()}. Returns false and records {@link #getLastError()} on failure. */
+    public boolean deleteFile() {
+        if (file == null) {
+            lastError = "no file";
+            return false;
+        }
+        lastError = null;
+        try {
+            Files.delete(file.toPath());
+            return true;
+        } catch (final IOException | SecurityException ex) {
+            lastError = ex.toString();
+            return false;
+        }
+    }
+
     // ---------------------------------------------------------------------------------------
     // static lookup
 
