@@ -60,6 +60,28 @@ public class WorkshopScriptLookupTest {
     }
 
     /**
+     * A release install serves stock scripts from the zip. A double-faced card's file joins both
+     * faces, so its front name is found by prefix, and only in the script that is filed under it.
+     */
+    @Test
+    public void aJoinedFileNameInTheZipIsTakenOnlyForTheCardItNames() throws IOException {
+        final Path zip = Files.createTempFile("cardsfolder", ".zip");
+        try (ZipOutputStream out = new ZipOutputStream(Files.newOutputStream(zip))) {
+            putScript(out, "w/workshop_zdfc_aaa.txt", "Workshop Zdfc Aaa"); // sorts first under the prefix and is another card
+            putScript(out, "w/workshop_zdfc_the_back.txt", "Workshop Zdfc");
+        }
+        try {
+            CardScriptInfo.useStockZipForTests(zip.toFile());
+            Assert.assertEquals(CardScriptInfo.stockStemForName("Workshop Zdfc"), "workshop_zdfc_the_back");
+            Assert.assertEquals(CardScriptInfo.stockStemForName("workshop zdfc"), "workshop_zdfc_the_back", "the reader keys names ignoring case");
+            Assert.assertNull(CardScriptInfo.stockStemForName("Workshop Zdf"), "a prefix of a name is not that card (held by the name check and the '_' join alike)");
+        } finally {
+            CardScriptInfo.useStockZipForTests(null);
+            Files.deleteIfExists(zip);
+        }
+    }
+
+    /**
      * A custom file under a stock stem is only that stock card's script when its Name: says so; a
      * hand-renamed file (grizzly_bears.txt holding Name:Grizzly Bearz) loads as a second card and the
      * stock Grizzly Bears must not show or save over it.

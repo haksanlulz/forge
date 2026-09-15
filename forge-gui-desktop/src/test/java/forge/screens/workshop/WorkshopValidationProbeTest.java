@@ -415,4 +415,28 @@ public class WorkshopValidationProbeTest {
         common.getEditor().removeCard(again);
         Assert.assertFalse(common.contains(name));
     }
+
+    /**
+     * Delete Custom Card restores a stock card the custom one shadowed by NAME, so the stock stem
+     * for a name must follow the reader's file names, not only the Workshop's own stem: the accent
+     * fold (d/dandan.txt), the joined DFC file, the reader's lazy-load transform (a/a_i_m_bot.txt),
+     * the rebalanced/ hyphen (a-akki_ronin.txt), a rebalanced DFC (hyphen candidate AND the
+     * rebalanced/ folder); and never a mere prefix ("Bin" is not bind.txt).
+     */
+    @Test
+    public void stockStemForNameFollowsTheReadersFileNames() {
+        Assert.assertEquals(CardScriptInfo.stockStemForName("Grizzly Bears"), "grizzly_bears");
+        Assert.assertEquals(CardScriptInfo.stockStemForName("Dandân"), "dandan");
+        Assert.assertEquals(CardScriptInfo.stockStemForName("Delver of Secrets"), "delver_of_secrets_insectile_aberration");
+        Assert.assertEquals(CardScriptInfo.stockStemForName("A.I.M. Bot"), "a_i_m_bot");
+        Assert.assertEquals(CardScriptInfo.stockStemForName("A-Akki Ronin"), "a-akki_ronin");
+        Assert.assertEquals(CardScriptInfo.stockStemForName("A-Alrund, God of the Cosmos"), "a-alrund_god_of_the_cosmos_hakka_whispering_raven",
+                "a rebalanced DFC: hyphen candidate + rebalanced/ folder");
+        Assert.assertNull(CardScriptInfo.stockStemForName("Bin"), "'bin' must not resolve to bind.txt / binding_*.txt");
+        Assert.assertEquals(CardScriptInfo.stockStemForName("Elesh Norn"), "elesh_norn_the_argent_etchings",
+                "elesh_norn_grand_cenobite sorts first under the same prefix and is another card");
+        Assert.assertEquals(CardScriptInfo.stockStemForName("elesh norn"), "elesh_norn_the_argent_etchings", "ignoring case");
+        Assert.assertNull(CardScriptInfo.stockStemForName("Grizzly"), "a prefix of a stock name is not that card");
+        Assert.assertNull(CardScriptInfo.stockStemForName("Workshop Probe Nothing"));
+    }
 }

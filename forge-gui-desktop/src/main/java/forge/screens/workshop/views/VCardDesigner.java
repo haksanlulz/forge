@@ -32,6 +32,8 @@ public enum VCardDesigner implements IVDoc<CCardDesigner> {
     private final FLabel btnNewCard = button("lblWorkshopNewCard", FSkinProp.ICO_NEW);
     private final FLabel btnSetArt = button("lblWorkshopSetArt", FSkinProp.ICO_OPEN);
     private final FLabel btnSetBackArt = button("lblWorkshopSetBackArt", FSkinProp.ICO_OPEN);
+    private final FLabel btnRevert = button("lblWorkshopRevertToStock", FSkinProp.ICO_EDIT);
+    private final FLabel btnDelete = button("lblWorkshopDeleteCustomCard", FSkinProp.ICO_DELETE);
 
     private final FLabel btnSaveCard = new FLabel.Builder()
             .opaque(true).hoverable(true)
@@ -53,6 +55,8 @@ public enum VCardDesigner implements IVDoc<CCardDesigner> {
         txtStatus.setRows(8); //a wrapped text area otherwise reports a one-line preferred height
         btnSetArt.setEnabled(false);
         btnSetBackArt.setVisible(false);
+        btnRevert.setVisible(false);
+        btnDelete.setVisible(false);
     }
 
     public FLabel getBtnSaveCard() {
@@ -74,6 +78,14 @@ public enum VCardDesigner implements IVDoc<CCardDesigner> {
 
     public FLabel getBtnSetBackArt() {
         return btnSetBackArt;
+    }
+
+    public FLabel getBtnRevert() {
+        return btnRevert;
+    }
+
+    public FLabel getBtnDelete() {
+        return btnDelete;
     }
 
     //========== Overridden methods
@@ -129,6 +141,8 @@ public enum VCardDesigner implements IVDoc<CCardDesigner> {
         body.add(btnNewCard, "growx, h 30!");
         body.add(btnSetArt, "growx, h 30!");
         body.add(btnSetBackArt, "growx, h 30!");
+        body.add(btnRevert, "growx, h 30!");
+        body.add(btnDelete, "growx, h 30!");
         body.add(btnSaveCard, "growx, h 30!, pushy, aligny bottom");
     }
 }
