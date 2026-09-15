@@ -1,7 +1,5 @@
 package forge.screens.workshop.controllers;
 
-import java.awt.event.FocusEvent;
-import java.awt.event.FocusListener;
 import java.util.Arrays;
 import java.util.Map.Entry;
 
@@ -61,15 +59,7 @@ public enum CCardScript implements ICDoc {
                 //Plain text components do not fire these events
             }
         });
-        VCardScript.SINGLETON_INSTANCE.getTxtScript().addFocusListener(new FocusListener() {
-            @Override
-            public void focusLost(final FocusEvent e) {
-                refresh();
-            }
-            @Override
-            public void focusGained(final FocusEvent e) {
-            }
-        });
+        //no focus listener on the text pane: refresh() on focus loss discarded the unsaved edit before the switch-away prompt could ask
     }
 
     private void updateDirtyFlag() {
@@ -77,7 +67,7 @@ public enum CCardScript implements ICDoc {
         if (isTextDirty == isTextNowDirty) { return; }
         isTextDirty = isTextNowDirty;
         VCardDesigner.SINGLETON_INSTANCE.getBtnSaveCard().setEnabled(isTextNowDirty);
-        VCardScript.SINGLETON_INSTANCE.getTabLabel().setText((isTextNowDirty ? "*" : "") + "Card Script");
+        VCardScript.SINGLETON_INSTANCE.getTabLabel().setText((isTextNowDirty ? "*" : "") + Localizer.getInstance().getMessage("lblCardScript"));
         WorkshopFileMenu.updateSaveEnabled();
     }
 
