@@ -686,12 +686,31 @@ public final class CardDb implements ICardDatabase, IDeckGenPool {
     }
 
     private PaperCard getBestUniquePrint(final Collection<PaperCard> cards) {
-        return cards.stream()
+        final Collection<PaperCard> candidates = withoutWorkshopArtUnlessOnly(cards);
+        return candidates.stream()
                 .filter(pc -> !pc.getRarity().equals(CardRarity.Special))
                 .min(Comparator.comparing((PaperCard pc) -> isPreferredLanguagePrint(pc) ? 0 : 1)
                         .thenComparing((PaperCard pc) -> editions.get(pc.getEdition()), defaultCardArtPreference)
                         .thenComparing(PaperCard::getCollectorNumber))
-                .orElseGet(() -> cards.iterator().next());
+                .orElseGet(() -> candidates.iterator().next());
+    }
+
+    /**
+     * A Workshop Art printing ({@link CardEdition#WORKSHOP_ART_CODE}: the user's own picture of a stock card,
+     * filed as a printing so the card stays stock) is chosen per deck slot and never by the art preference,
+     * whose date order would take it for ORIGINAL_ART_ALL_EDITIONS on every card it holds. It is a card's
+     * unique print only when it is the card's only print.
+     */
+    private static Collection<PaperCard> withoutWorkshopArtUnlessOnly(final Collection<PaperCard> cards) {
+        if (cards.size() < 2 || cards.stream().noneMatch(CardDb::isWorkshopArtPrint)) {
+            return cards;
+        }
+        final List<PaperCard> others = cards.stream().filter(pc -> !isWorkshopArtPrint(pc)).collect(Collectors.toList());
+        return others.isEmpty() ? cards : others;
+    }
+
+    private static boolean isWorkshopArtPrint(final PaperCard pc) {
+        return CardEdition.WORKSHOP_ART_CODE.equalsIgnoreCase(pc.getEdition());
     }
 
     private boolean isPreferredLanguagePrint(PaperCard pc) {
@@ -1029,6 +1048,12 @@ public final class CardDb implements ICardDatabase, IDeckGenPool {
          */
         if (acceptedEditions.isEmpty())
             acceptedEditions.addAll(cardEditions);
+
+        // A Workshop Art printing (the user's picture of a stock card, filed as a printing so the card stays
+        // stock) is chosen per deck slot, never here: its pre-Alpha date would win ORIGINAL_ART_ALL_EDITIONS,
+        // and the walk below to a printing with a picture would land on it under LATEST_ART_ALL_EDITIONS
+        // whenever no stock printing has one. It stays only when no other edition is accepted.
+        CardEdition.removeWorkshopArtUnlessOnly(acceptedEditions);
 
         if (acceptedEditions.size() > 1) {
             Collections.sort(acceptedEditions);  // CardEdition correctly sort by (release) date

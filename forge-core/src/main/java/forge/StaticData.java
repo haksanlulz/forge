@@ -181,6 +181,16 @@ public class StaticData {
         return this.editions;
     }
 
+    /**
+     * Registers a custom edition created after start-up (the Workshop's art edition) and drops the
+     * cached edition lists so that it is listed with the others.
+     */
+    public void addCustomEdition(CardEdition edition) {
+        editions.addCustomEdition(edition);
+        sortedEditions = null;
+        editionsTypeMap = null;
+    }
+
     private List<CardEdition> sortedEditions;
     public final List<CardEdition> getSortedEditions() {
         if (sortedEditions == null) {

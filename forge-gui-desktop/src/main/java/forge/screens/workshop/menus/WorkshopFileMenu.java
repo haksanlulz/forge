@@ -29,11 +29,13 @@ public final class WorkshopFileMenu {
         JMenu menu = new JMenu(Localizer.getInstance().getMessage("lblFile"));
         menu.setMnemonic(KeyEvent.VK_F);
         menu.add(getMenuItem_NewCard());
+        menu.add(getMenuItem_AddArtVariant());
         menu.add(getMenuItem_SaveCard());
         return menu;
     }
 
     private static JMenuItem menuItem_SaveCard;
+    private static JMenuItem menuItem_AddArtVariant;
 
     public static void updateSaveEnabled() {
         if (menuItem_SaveCard == null)
@@ -41,11 +43,27 @@ public final class WorkshopFileMenu {
         menuItem_SaveCard.setEnabled(CCardScript.SINGLETON_INSTANCE.hasChanges());
     }
 
+    /** Add Art Variant... needs a selected printing; the Card Designer calls this whenever the selection changes. */
+    public static void updateAddArtVariantEnabled() {
+        if (menuItem_AddArtVariant == null)
+            getMenuItem_AddArtVariant();
+        menuItem_AddArtVariant.setEnabled(CCardScript.SINGLETON_INSTANCE.getCurrentCard() != null);
+    }
+
     private static JMenuItem getMenuItem_NewCard() {
         SkinnedMenuItem menuItem = new SkinnedMenuItem(Localizer.getInstance().getMessage("lblWorkshopNewCard"));
         menuItem.setIcon(showIcons ? MenuUtil.getMenuIcon(FSkinProp.ICO_NEW) : null);
         menuItem.setAccelerator(MenuUtil.getAcceleratorKey(KeyEvent.VK_N));
         menuItem.addActionListener(e -> CCardDesigner.SINGLETON_INSTANCE.newCard());
+        return menuItem;
+    }
+
+    private static JMenuItem getMenuItem_AddArtVariant() {
+        SkinnedMenuItem menuItem = new SkinnedMenuItem(Localizer.getInstance().getMessage("lblWorkshopAddArtVariant"));
+        menuItem.setIcon(showIcons ? MenuUtil.getMenuIcon(FSkinProp.ICO_PLUS) : null);
+        menuItem.addActionListener(e -> CCardDesigner.SINGLETON_INSTANCE.addArtVariant());
+        menuItem_AddArtVariant = menuItem;
+        updateAddArtVariantEnabled();
         return menuItem;
     }
 

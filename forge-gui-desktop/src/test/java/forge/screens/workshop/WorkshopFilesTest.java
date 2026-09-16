@@ -3,8 +3,10 @@ package forge.screens.workshop;
 import java.awt.image.BufferedImage;
 import java.io.File;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.text.SimpleDateFormat;
 import java.util.Comparator;
 import java.util.List;
 import java.util.stream.Stream;
@@ -17,10 +19,13 @@ import org.testng.annotations.AfterMethod;
 import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
 
+import forge.card.CardEdition;
+import forge.card.CardRarity;
+
 /**
  * The file contract of {@link WorkshopFiles} over temp directories, pinned where it meets the rest
- * of Forge: the picture cache's lookup order and folder preload, and the exception type the UI
- * handles.
+ * of Forge: the picture cache's lookup order and folder preload, the edition reader, and the
+ * exception type the UI handles.
  */
 public class WorkshopFilesTest {
 
@@ -167,5 +172,131 @@ public class WorkshopFilesTest {
         final String key = SystemUtils.IS_OS_WINDOWS ? "USER/Foo<Bar.full" : "USER/Foo\u0000Bar.full";
         final File png = writeImage(tmp, "d.png", "png");
         WorkshopFiles.installArt(png, tmp.resolve("pics").toFile(), key);
+    }
+
+    /**
+     * Add Art Variant on a card the Workshop Art edition does not know yet writes the edition file from
+     * nothing, and what it writes is what the edition reader loads at the next start: the code, the name,
+     * the pre-Alpha date, the custom type the folder forces, and one entry of the card numbered 1.
+     */
+    @Test
+    public void appendArtVariantWritesTheEditionFileTheReaderLoads() throws IOException {
+        final File editions = Files.createDirectories(tmp.resolve("editions")).toFile();
+        final File file = new File(editions, WorkshopFiles.ART_EDITION_FILE);
+        Assert.assertFalse(file.exists());
+
+        Assert.assertEquals(WorkshopFiles.appendArtVariant(file, "Grizzly Bears", CardRarity.Common), new WorkshopFiles.ArtVariant(1, 1));
+
+        final CardEdition edition = new CardEdition.Reader(editions, true).readFile(file);
+        Assert.assertEquals(edition.getCode(), WorkshopFiles.ART_EDITION_CODE);
+        Assert.assertEquals(edition.getName(), WorkshopFiles.ART_EDITION_NAME);
+        Assert.assertEquals(edition.getType(), CardEdition.Type.CUSTOM_SET);
+        Assert.assertEquals(new SimpleDateFormat("yyyy-MM-dd").format(edition.getDate()), WorkshopFiles.ART_EDITION_DATE);
+        final List<CardEdition.EditionEntry> bears = edition.getCardInSet("Grizzly Bears");
+        Assert.assertEquals(bears.size(), 1, bears.toString());
+        Assert.assertEquals(bears.get(0).collectorNumber(), "1");
+        Assert.assertEquals(bears.get(0).rarity(), CardRarity.Common);
+        Assert.assertFalse(new File(file.getPath() + ".part").exists(), "no .part left behind");
+    }
+
+    /**
+     * A later Add appends to the existing file with the next collector number and an art index one past
+     * the entries of that name (CardDb numbers a name's duplicate entries in file order at load), and the
+     * entry lands in [cards] even when a hand-added section follows it: an appended line joins the LAST
+     * section of the file, and the reader would have filed the printing as a token. A rarity the reader's
+     * pattern has no letter for is written as Special; written as is, it would be read as part of the name.
+     */
+    @Test
+    public void appendArtVariantNumbersTheNextEntryAndKeepsItInTheCardsSection() throws IOException {
+        final File editions = Files.createDirectories(tmp.resolve("editions")).toFile();
+        final File file = new File(editions, WorkshopFiles.ART_EDITION_FILE);
+        Files.write(file.toPath(), List.of(
+                "[metadata]", "Code=WSART", "Name=Workshop Art", "Date=1993-01-01", "Type=Custom", "",
+                "[cards]", "1 C Grizzly Bears", "2 R Llanowar Elves", "",
+                "[tokens]", "1 Bear"), StandardCharsets.UTF_8);
+
+        Assert.assertEquals(WorkshopFiles.appendArtVariant(file, "Grizzly Bears", CardRarity.Common), new WorkshopFiles.ArtVariant(3, 2));
+        Assert.assertEquals(WorkshopFiles.appendArtVariant(file, "Llanowar Elves", CardRarity.Unknown), new WorkshopFiles.ArtVariant(4, 2));
+
+        final CardEdition edition = new CardEdition.Reader(editions, true).readFile(file);
+        Assert.assertEquals(edition.getAllCardsInSet().size(), 4, "both entries are card entries: " + edition.getAllCardsInSet());
+        final List<CardEdition.EditionEntry> bears = edition.getCardInSet("Grizzly Bears");
+        Assert.assertEquals(bears.size(), 2, bears.toString());
+        Assert.assertEquals(bears.get(1).collectorNumber(), "3");
+        Assert.assertEquals(bears.get(1).rarity(), CardRarity.Common);
+        final List<CardEdition.EditionEntry> elves = edition.getCardInSet("Llanowar Elves");
+        Assert.assertEquals(elves.size(), 2, elves.toString());
+        Assert.assertEquals(elves.get(1).collectorNumber(), "4");
+        Assert.assertEquals(elves.get(1).rarity(), CardRarity.Special, "Unknown has no letter in the reader's pattern");
+    }
+
+    /** A picture already under the new key is not the moved printing's to overwrite, and nothing moves when one is found. */
+    @Test
+    public void renameArtRefusesAnOccupiedKeyBeforeItMovesAnything() throws IOException {
+        final Path set = Files.createDirectories(tmp.resolve("pics/WSART"));
+        final File oldJpg = writeImage(set, "Bear.full.jpg", "jpg");
+        final File oldPng = writeImage(set, "Bear.full.png", "png");
+        final File taken = set.resolve("Bear1.full.png").toFile();
+        Files.writeString(taken.toPath(), "someone else's");
+
+        Assert.assertThrows(IOException.class, () -> WorkshopFiles.renameArt(tmp.resolve("pics").toFile(), "WSART/Bear.full", "WSART/Bear1.full"));
+        Assert.assertTrue(oldJpg.isFile(), "the jpg must not have moved: its target was free, the png's was not");
+        Assert.assertTrue(oldPng.isFile());
+        Assert.assertFalse(set.resolve("Bear1.full.jpg").toFile().exists());
+        Assert.assertEquals(Files.readString(taken.toPath()), "someone else's");
+
+        Assert.assertTrue(taken.delete());
+        final List<File> moved = WorkshopFiles.renameArt(tmp.resolve("pics").toFile(), "WSART/Bear.full", "WSART/Bear1.full");
+        Assert.assertEquals(moved.size(), 2);
+        Assert.assertFalse(oldJpg.exists());
+        Assert.assertTrue(set.resolve("Bear1.full.jpg").toFile().isFile());
+        Assert.assertTrue(set.resolve("Bear1.full.png").toFile().isFile());
+    }
+
+    @Test
+    public void restorePutsBackWhatSnapshotFound() throws IOException {
+        final File edition = tmp.resolve("Workshop Art.txt").toFile();
+        Assert.assertNull(WorkshopFiles.snapshot(edition), "no file yet");
+        Files.writeString(edition.toPath(), "first");
+        final byte[] before = WorkshopFiles.snapshot(edition);
+
+        Files.writeString(edition.toPath(), "first\nsecond");
+        WorkshopFiles.restore(edition, before);
+        Assert.assertEquals(Files.readString(edition.toPath()), "first");
+        Assert.assertFalse(new File(edition.getPath() + ".part").exists());
+
+        WorkshopFiles.restore(edition, null);
+        Assert.assertFalse(edition.exists(), "null is 'there was no file'");
+    }
+
+    /**
+     * A file that is not an image is refused before anything is written. Add Art Variant checks the
+     * picture first, or the edition entry and the database printing would exist for no art; Set Art's
+     * install refuses the same file the same way, and writes nothing.
+     */
+    @Test
+    public void requireImageRefusesAFileThatIsNotAnImage() throws IOException {
+        final File notAnImage = tmp.resolve("text.png").toFile();
+        Files.write(notAnImage.toPath(), List.of("not a picture"), StandardCharsets.UTF_8);
+        final File pics = tmp.resolve("pics").toFile();
+
+        Assert.assertThrows(IOException.class, () -> WorkshopFiles.requireImage(notAnImage));
+        Assert.assertThrows(IOException.class, () -> WorkshopFiles.requireImage(tmp.resolve("missing.png").toFile()));
+        Assert.assertThrows(IOException.class, () -> WorkshopFiles.installArt(notAnImage, pics, "USER/My Card.full"));
+        Assert.assertFalse(pics.exists(), "a refused picture writes nothing");
+    }
+
+    /**
+     * CardEdition.Reader takes " @" as the artist separator and "$" as the parameter marker, and silently
+     * skips a line it cannot parse. A custom card named that way would get a printing that exists this
+     * session and is gone at the next start, its picture orphaned. Refuse before writing anything.
+     */
+    @Test
+    public void appendArtVariantRefusesANameTheReaderWouldMisread() throws IOException {
+        final File editions = Files.createDirectories(tmp.resolve("editions")).toFile();
+        final File file = new File(editions, WorkshopFiles.ART_EDITION_FILE);
+        Assert.assertThrows(IOException.class, () -> WorkshopFiles.appendArtVariant(file, "Bear @ Large", CardRarity.Common));
+        Assert.assertThrows(IOException.class, () -> WorkshopFiles.appendArtVariant(file, "Cash $$$", CardRarity.Common));
+        Assert.assertFalse(file.exists(), "a refused name writes nothing");
     }
 }
