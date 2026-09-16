@@ -1,6 +1,8 @@
 package forge.screens.workshop;
 
+import java.io.File;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -21,6 +23,7 @@ import forge.GuiDesktop;
 import forge.ImageKeys;
 import forge.StaticData;
 import forge.card.CardDb;
+import forge.card.CardEdition;
 import forge.card.CardRarity;
 import forge.card.CardRules;
 import forge.card.ICardFace;
@@ -28,6 +31,7 @@ import forge.gamesimulationtests.util.CardDatabaseHelper;
 import forge.gui.GuiBase;
 import forge.gui.card.CardScriptInfo;
 import forge.gui.card.CardScriptProbe;
+import forge.item.IPaperCard;
 import forge.item.PaperCard;
 import forge.localinstance.properties.ForgeConstants;
 import forge.model.FModel;
@@ -398,6 +402,91 @@ public class WorkshopValidationProbeTest {
         Assert.assertSame(common.getCard(name).getRules(), again);
         common.getEditor().removeCard(again);
         Assert.assertFalse(common.contains(name));
+    }
+
+    /**
+     * A Workshop Art printing (Add Art Variant's copy of a stock card with the user's picture, in edition
+     * WSART) is chosen per deck slot and never by the art preference: the set-less lookup leaves WSART out
+     * whenever another edition is accepted, and the unique-by-name index skips it unless it is the card's
+     * only print. The edition's pre-Alpha date alone would not do this: ORIGINAL_ART_ALL_EDITIONS takes the
+     * oldest date, and LATEST_ART_ALL_EDITIONS walks to the first printing WITH a picture, which the
+     * Workshop one has and, here, no stock printing does. The edition is registered as the Workshop does it
+     * at runtime: read from the file Add Art Variant writes and put into a collection the custom-folder
+     * append has already locked.
+     */
+    @Test
+    public void workshopArtPrintingIsNeverTheArtPreferencesPick() throws IOException {
+        final Path tmp = Files.createTempDirectory("workshop-art-preference");
+        try {
+            final String stockBear = "Workshop Probe Stock Bear";
+            final String onlyBear = "Workshop Probe Only Bear";
+            final File stockDir = Files.createDirectories(tmp.resolve("editions")).toFile();
+            Files.write(new File(stockDir, "Probe Stock.txt").toPath(), List.of(
+                    "[metadata]", "Code=WSSTK", "Name=Workshop Probe Stock", "Date=2000-01-01", "Type=Expansion", "",
+                    "[cards]", "1 C " + stockBear), StandardCharsets.UTF_8);
+            final File customDir = Files.createDirectories(tmp.resolve("custom")).toFile();
+            final File artFile = new File(customDir, WorkshopFiles.ART_EDITION_FILE);
+            WorkshopFiles.appendArtVariant(artFile, stockBear, CardRarity.Common);
+            WorkshopFiles.appendArtVariant(artFile, onlyBear, CardRarity.Common);
+
+            // as at start-up: the stock folder, then the custom folder appended, which locks the collection
+            final CardEdition.Collection editions = new CardEdition.Collection(new CardEdition.Reader(stockDir));
+            editions.append(new CardEdition.Collection(new CardEdition.Reader(Files.createDirectories(tmp.resolve("empty")).toFile(), true)));
+            final CardEdition workshopArt = new CardEdition.Reader(customDir, true).readFile(artFile);
+            Assert.assertThrows(UnsupportedOperationException.class, () -> editions.add(workshopArt)); // locked: why addCustomEdition exists
+            editions.addCustomEdition(workshopArt);
+            Assert.assertSame(editions.get(CardEdition.WORKSHOP_ART_CODE), workshopArt, "registered after start-up, retrievable by code");
+            Assert.assertThrows(IllegalArgumentException.class, () -> editions.addCustomEdition(editions.get("WSSTK")));
+
+            final CardRules stockRules = CardScriptProbe.parseRules("Name:" + stockBear + "\nManaCost:1 G\nTypes:Creature Bear\nPT:2/2\nOracle:\n", "workshop_probe_stock_bear");
+            final CardRules onlyRules = CardScriptProbe.parseRules("Name:" + onlyBear + "\nManaCost:1 G\nTypes:Creature Bear\nPT:2/2\nOracle:\n", "workshop_probe_only_bear");
+            final HashMap<String, CardRules> rules = new HashMap<>();
+            rules.put(stockBear, stockRules);
+            rules.put(onlyBear, onlyRules);
+            final CardDb cardDb = new CardDb(rules, editions, new HashSet<>());
+            cardDb.setCardArtPreference(false, false); // ORIGINAL_ART_ALL_EDITIONS: the oldest date, and WSART is dated 1993
+            // no stock scan present, and the Workshop printing has its picture: the walk to a printing with an image lands on it
+            final PaperCard stock = new PaperCard(stockRules, "WSSTK", CardRarity.Common) {
+                @Override
+                public boolean hasImage(final boolean update) {
+                    return false;
+                }
+            };
+            final PaperCard variant = new PaperCard(stockRules, CardEdition.WORKSHOP_ART_CODE, CardRarity.Common) {
+                @Override
+                public boolean hasImage(final boolean update) {
+                    return true;
+                }
+            };
+            final PaperCard only = new PaperCard(onlyRules, CardEdition.WORKSHOP_ART_CODE, CardRarity.Common) {
+                @Override
+                public boolean hasImage(final boolean update) {
+                    return true;
+                }
+            };
+            cardDb.addCard(stock);
+            cardDb.addCard(variant);
+            cardDb.addCard(only);
+
+            Assert.assertSame(cardDb.getCardFromEditions(stockBear, CardDb.CardArtPreference.ORIGINAL_ART_ALL_EDITIONS, IPaperCard.DEFAULT_ART_INDEX, null), stock,
+                    "original art: the 1993 Workshop printing must not win by date");
+            Assert.assertSame(cardDb.getCardFromEditions(stockBear, CardDb.CardArtPreference.LATEST_ART_ALL_EDITIONS, IPaperCard.DEFAULT_ART_INDEX, null), stock,
+                    "latest art: the walk to a printing with a picture must not land on the Workshop one");
+            Assert.assertSame(cardDb.getCard(stockBear), stock, "a set-less request under the default preference");
+            Assert.assertSame(cardDb.getCard(stockBear, CardEdition.WORKSHOP_ART_CODE), variant, "asked for by set, it is still the printing");
+            Assert.assertSame(cardDb.getCardFromEditions(onlyBear, CardDb.CardArtPreference.LATEST_ART_ALL_EDITIONS, IPaperCard.DEFAULT_ART_INDEX, null), only,
+                    "a card whose only printing is the Workshop one keeps it");
+
+            // the unique-by-name index is rebuilt by the editor's reinit (a Workshop save); it must skip WSART the same way
+            cardDb.getEditor().putCard(CardScriptProbe.parseRules("Name:" + stockBear + "\nManaCost:1 G\nTypes:Creature Bear\nPT:2/2\nOracle:\n", "workshop_probe_stock_bear"));
+            Assert.assertTrue(cardDb.getUniqueCards().contains(stock), "unique print: the stock printing");
+            Assert.assertFalse(cardDb.getUniqueCards().contains(variant), "unique print: never the Workshop one while a stock print exists");
+            Assert.assertTrue(cardDb.getUniqueCards().contains(only), "unique print: the Workshop one when it is the card's only print");
+        } finally {
+            try (Stream<Path> walk = Files.walk(tmp)) {
+                walk.sorted(Comparator.reverseOrder()).forEach(p -> p.toFile().delete());
+            }
+        }
     }
 
     /**

@@ -13,18 +13,21 @@ import org.apache.commons.lang3.exception.ExceptionUtils;
 
 import forge.ImageCache;
 import forge.card.CardDb;
+import forge.card.CardEdition;
 import forge.card.CardRules;
 import forge.card.CardSplitType;
 import forge.gui.card.CardScriptInfo;
 import forge.gui.card.CardScriptInfo.Source;
 import forge.gui.card.CardScriptProbe;
 import forge.gui.framework.ICDoc;
+import forge.item.IPaperCard;
 import forge.item.PaperCard;
 import forge.itemmanager.CardManager;
 import forge.localinstance.properties.ForgeConstants;
 import forge.model.FModel;
 import forge.screens.match.controllers.CDetailPicture;
 import forge.screens.workshop.WorkshopFiles;
+import forge.screens.workshop.menus.WorkshopFileMenu;
 import forge.screens.workshop.views.VCardDesigner;
 import forge.screens.workshop.views.VWorkshopCatalog;
 import forge.toolbox.FOptionPane;
@@ -50,6 +53,7 @@ public enum CCardDesigner implements ICDoc {
         final VCardDesigner view = VCardDesigner.SINGLETON_INSTANCE;
         view.getBtnSaveCard().setCommand((Runnable) CCardScript.SINGLETON_INSTANCE::saveChanges);
         view.getBtnNewCard().setCommand((Runnable) this::newCard);
+        view.getBtnAddArtVariant().setCommand((Runnable) this::addArtVariant);
         view.getBtnSetArt().setCommand((Runnable) () -> setArt(false));
         view.getBtnSetBackArt().setCommand((Runnable) () -> setArt(true));
         view.getBtnRevert().setCommand((Runnable) this::revertToStock);
@@ -96,6 +100,27 @@ public enum CCardDesigner implements ICDoc {
     private static boolean hasBackFaceArt(final PaperCard pc) {
         return pc != null && pc.hasBackFace() && pc.getRules().getSplitType() != CardSplitType.Flip
                 && !StringUtils.isBlank(pc.getCardAltImageKey());
+    }
+
+    /**
+     * Whether Set Art may overwrite this printing's picture: only a picture that is the user's to begin
+     * with. A stock printing's file is a downloaded scan in a stock set folder, and a card whose art
+     * alone changes must not become a custom card, so that picture is never overwritten - Add Art
+     * Variant files the user's picture as a new printing instead. A custom card's, or any printing in a
+     * custom edition (the Workshop Art edition among them), is the user's. A custom override's is not:
+     * the override replaces the rules and keeps the stock printings, so its picture is still the scan,
+     * and Revert to Stock would leave the user's picture where the scan was.
+     */
+    private static boolean allowsSetArt(final PaperCard pc, final CardScriptInfo info) {
+        if (pc == null) {
+            return false;
+        }
+        final Source source = info == null ? null : info.getSource();
+        if (source == Source.CUSTOM_CARD) { //an override keeps the stock printings, so its picture is still a downloaded scan
+            return true;
+        }
+        final CardEdition edition = FModel.getMagicDb().getEditions().get(pc.getEdition());
+        return edition != null && edition.getType() == CardEdition.Type.CUSTOM_SET;
     }
 
     /**
@@ -163,8 +188,12 @@ public enum CCardDesigner implements ICDoc {
             }
         }
         final String imageKey = pc == null ? null : pc.getCardImageKey();
+        final boolean canSetArt = allowsSetArt(pc, info);
         if (!StringUtils.isBlank(imageKey)) {
             status.append('\n').append(msg("lblWorkshopStatusArtPath", artFileFor(imageKey).getPath()));
+            if (!canSetArt) {
+                status.append('\n').append(msg("lblWorkshopStatusStockArt"));
+            }
         }
         if (artNote != null && pc == artNoteCard) {
             status.append('\n').append(artNote);
@@ -179,10 +208,13 @@ public enum CCardDesigner implements ICDoc {
         view.getTxtStatus().setText(status.toString());
 
         final Source source = info == null ? null : info.getSource();
-        view.getBtnSetArt().setEnabled(!StringUtils.isBlank(imageKey));
+        view.getBtnAddArtVariant().setEnabled(pc != null);
+        view.getBtnSetArt().setEnabled(!StringUtils.isBlank(imageKey) && canSetArt);
         view.getBtnSetBackArt().setVisible(hasBackFaceArt(pc));
+        view.getBtnSetBackArt().setEnabled(canSetArt);
         view.getBtnRevert().setVisible(source == Source.CUSTOM_OVERRIDE);
         view.getBtnDelete().setVisible(source == Source.CUSTOM_CARD);
+        WorkshopFileMenu.updateAddArtVariantEnabled();
     }
 
     /** Prompts for a name, writes a template script under the custom cards dir, registers it and selects it. */
@@ -255,14 +287,28 @@ public enum CCardDesigner implements ICDoc {
         script().showCard(pc); //no-op when the listener already did it
     }
 
+    /** The image file chooser Set Art and Add Art Variant share; null when the user cancels. */
+    private File chooseImage() {
+        final JFileChooser chooser = lastArtDir == null ? new JFileChooser() : new JFileChooser(lastArtDir);
+        chooser.setFileFilter(new FileNameExtensionFilter(msg("lblWorkshopImageFiles"), "jpg", "jpeg", "png"));
+        chooser.setAcceptAllFileFilterUsed(false);
+        chooser.setMultiSelectionEnabled(false);
+        if (chooser.showOpenDialog(JOptionPane.getRootFrame()) != JFileChooser.APPROVE_OPTION) {
+            return null;
+        }
+        final File src = chooser.getSelectedFile();
+        lastArtDir = src.getParentFile();
+        return src;
+    }
+
     /** Copies a picked image into the picture cache under this printing's image key and repaints. */
     public void setArt(final boolean backFace) {
         if (script().getCurrentCard() == null || !script().canSwitchAway(false)) {
             return;
         }
         final PaperCard pc = script().getCurrentCard(); //read after the gate: its Save option can rename the current card
-        if (pc == null) {
-            return;
+        if (pc == null || !allowsSetArt(pc, script().getCurrentScriptInfo())) {
+            return; //a stock printing's picture is a downloaded scan: Add Art Variant is how it gets the user's art
         }
         if (backFace && !hasBackFaceArt(pc)) {
             return; //a flip card's back file would be written and never read
@@ -271,15 +317,10 @@ public enum CCardDesigner implements ICDoc {
         if (StringUtils.isBlank(imageKey)) {
             return;
         }
-        final JFileChooser chooser = lastArtDir == null ? new JFileChooser() : new JFileChooser(lastArtDir);
-        chooser.setFileFilter(new FileNameExtensionFilter(msg("lblWorkshopImageFiles"), "jpg", "jpeg", "png"));
-        chooser.setAcceptAllFileFilterUsed(false);
-        chooser.setMultiSelectionEnabled(false);
-        if (chooser.showOpenDialog(JOptionPane.getRootFrame()) != JFileChooser.APPROVE_OPTION) {
+        final File src = chooseImage();
+        if (src == null) {
             return;
         }
-        final File src = chooser.getSelectedFile();
-        lastArtDir = src.getParentFile();
 
         final File picsRoot = new File(ForgeConstants.CACHE_CARD_PICS_DIR);
         final File dest;
@@ -308,6 +349,118 @@ public enum CCardDesigner implements ICDoc {
         pictures().showItem(pc);
         catalog().repaint();
         refreshFor(pc, script().getCurrentScriptInfo());
+    }
+
+    /**
+     * Adds the picked picture as a NEW printing of the selected card in the Workshop Art edition. The
+     * stock printings, their pictures and the card's rules are untouched: a card whose art alone changed
+     * is not a custom card, so CardRules.isCustom() stays what it was. The edition file gets the entry,
+     * the edition and the printing are registered in the live database (the deck editor's Change
+     * printing... lists it at once), and the printing is shown in the picture panel and the script pane.
+     * The catalog lists one row per card name, so the new printing takes that row only when the pool
+     * happens to order it last; it is selected there as far as that allows.
+     */
+    public void addArtVariant() {
+        if (script().getCurrentCard() == null || !script().canSwitchAway(false) || CCardScript.refuseIfNetworkMatchActive()) {
+            return; //a match reads the card database this adds to; the other buttons gate the same way
+        }
+        final PaperCard pc = script().getCurrentCard(); //read after the gate: its Save option can rename the current card
+        if (pc == null) {
+            return;
+        }
+        final File src = chooseImage();
+        if (src == null) {
+            return;
+        }
+
+        final File editionFile = new File(ForgeConstants.USER_CUSTOM_EDITIONS_DIR, WorkshopFiles.ART_EDITION_FILE);
+        final File picsRoot = new File(ForgeConstants.CACHE_CARD_PICS_DIR);
+        final CardDb cardDb = dbFor(pc.getRules());
+        final String name = pc.getName();
+        final WorkshopFiles.ArtVariant variant;
+        final CardEdition edition;
+        try {
+            WorkshopFiles.requireImage(src); //before anything is written: a non-image must not leave an entry behind
+            variant = WorkshopFiles.appendArtVariant(editionFile, name, pc.getRarity());
+            edition = registerArtEdition(editionFile);
+        } catch (final IOException | RuntimeException ex) {
+            FOptionPane.showErrorDialog(msg("lblWorkshopArtVariantRefused", rootMessage(ex)));
+            return;
+        }
+
+        final List<PaperCard> earlier = cardDb.getAllCardsNoAlt(name, p -> edition.getCode().equals(p.getEdition()));
+        //the edition's only printing of this name is keyed Name.full now and Name1.full once a second is registered:
+        //read its keys BEFORE addCard raises the art count, or a key computed afterwards already carries the index
+        final PaperCard first = earlier.size() == 1 ? earlier.get(0) : null;
+        final String firstFront = first == null ? null : first.getCardImageKey();
+        final String firstBack = first != null && hasBackFaceArt(first) ? first.getCardAltImageKey() : null;
+        //what the edition reader would build from the new line at the next start: no artist, no functional variant
+        final PaperCard added = new PaperCard(pc.getRules(), edition.getCode(), pc.getRarity(), variant.artIndex(), false,
+                String.valueOf(variant.collectorNumber()), IPaperCard.NO_ARTIST_NAME, IPaperCard.NO_FUNCTIONAL_VARIANT);
+        cardDb.addCard(added);
+        if (cardDb.getAllCardsNoAlt(name).stream().noneMatch(p -> p == added)) {
+            //addCard drops a filtered (funny) name without a word; such a card is never in the catalog, but a silent no-op must not read as success
+            FOptionPane.showErrorDialog(msg("lblWorkshopArtVariantRefused", name));
+            return;
+        }
+        if (first != null) {
+            renumberFirstVariant(first, firstFront, firstBack, picsRoot);
+        }
+
+        final String imageKey = added.getCardImageKey(); //computed now: it carries the art index once the edition holds several of this name
+        File dest = null;
+        try {
+            //no replace prompt: the key is new to the edition, so at most a leftover of a hand-removed entry can sit
+            //there, and the entry and the printing are already registered by the time the key is known
+            dest = WorkshopFiles.installArt(src, picsRoot, imageKey);
+        } catch (final IOException ex) {
+            FOptionPane.showErrorDialog(msg("lblWorkshopArtVariantArtFailed", String.valueOf(ex.getMessage())));
+        }
+        ImageCache.invalidate(added);
+        artNote = dest == null ? null : msg("lblWorkshopArtVariantAdded", String.valueOf(variant.collectorNumber()), edition.getName(), editionFile.getPath());
+        artNoteCard = added;
+
+        addToCatalog(added); //the selection listener shows the printing when it lands on the row
+        select(added);
+        script().showCard(added); //no-op when the listener already did it
+        pictures().showItem(added); //and the picture follows the new printing even when the row kept a stock one
+        catalog().repaint();
+        refreshFor(added, script().getCurrentScriptInfo());
+    }
+
+    /**
+     * Reads the Workshop Art edition file back and puts it into the live edition collection, replacing
+     * the copy registered from an earlier add so its card list is current. The reader types it CUSTOM_SET
+     * as it does for every file in the custom editions folder, which is what {@link #allowsSetArt} and
+     * the export's set-folder walk key on.
+     */
+    private static CardEdition registerArtEdition(final File editionFile) {
+        final CardEdition edition = new CardEdition.Reader(editionFile.getParentFile(), true).readFile(editionFile);
+        FModel.getMagicDb().addCustomEdition(edition);
+        return edition;
+    }
+
+    /**
+     * The Workshop Art edition's first printing of a card is keyed {@code Name.full} while it is the
+     * edition's only printing of that name and {@code Name1.full} once a second is filed (ImageUtil
+     * appends the art index when a set holds several): moves its picture(s) to the new key and drops
+     * every cache entry under the old one, or the printing would read as having no picture. The old
+     * keys are the caller's, read before the second printing was registered: the key is computed lazily
+     * from the live art count, so one first asked for afterwards would already be the new key and
+     * nothing would move.
+     */
+    private static void renumberFirstVariant(final PaperCard first, final String oldFront, final String oldBack, final File picsRoot) {
+        ImageCache.invalidate(first); //under the old keys, while they are still the cached ones
+        first.resetImageKeys();
+        try {
+            WorkshopFiles.renameArt(picsRoot, oldFront, first.getCardImageKey());
+            if (oldBack != null) {
+                WorkshopFiles.renameArt(picsRoot, oldBack, first.getCardAltImageKey());
+            }
+        } catch (final IOException ex) {
+            FOptionPane.showErrorDialog(msg("lblWorkshopArtVariantArtFailed", String.valueOf(ex.getMessage())));
+        }
+        ImageCache.invalidate(first); //the folder listing behind hasImage is read again with the moved file
     }
 
     /** Deletes the custom override of a stock card and puts the stock script back, in memory and in the pane. */

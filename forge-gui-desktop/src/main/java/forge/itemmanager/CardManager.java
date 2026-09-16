@@ -94,6 +94,13 @@ public class CardManager extends ItemManager<PaperCard> {
                 // Policy is too strict for current PaperCard in Entry. Remove any filter
                 acceptedEditions.addAll(entriesByEdition.keySet());
 
+            // A Workshop Art printing (CardEdition.WORKSHOP_ART_CODE: the user's own picture of a stock card, filed as
+            // a printing so the card stays stock) is chosen per deck slot, never by the art preference. CardDb leaves
+            // it out of a set-less lookup and of the unique-by-name index the same way; this pick must agree.
+            if (acceptedEditions.size() > 1) {
+                acceptedEditions.removeIf(ed -> CardEdition.WORKSHOP_ART_CODE.equalsIgnoreCase(ed.getCode()));
+            }
+
             Entry<PaperCard, Integer> cardEntry = getCardEntryToAdd(entriesByEdition, acceptedEditions, preferredLang);
             if (cardEntry != null)
                 cardsMap.put(cardEntry.getKey(), cardEntry.getValue());

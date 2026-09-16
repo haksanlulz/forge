@@ -30,6 +30,7 @@ public enum VCardDesigner implements IVDoc<CCardDesigner> {
     private final FTextArea txtStatus = new FTextArea();
 
     private final FLabel btnNewCard = button("lblWorkshopNewCard", FSkinProp.ICO_NEW);
+    private final FLabel btnAddArtVariant = button("lblWorkshopAddArtVariant", FSkinProp.ICO_PLUS);
     private final FLabel btnSetArt = button("lblWorkshopSetArt", FSkinProp.ICO_OPEN);
     private final FLabel btnSetBackArt = button("lblWorkshopSetBackArt", FSkinProp.ICO_OPEN);
     private final FLabel btnRevert = button("lblWorkshopRevertToStock", FSkinProp.ICO_EDIT);
@@ -53,6 +54,7 @@ public enum VCardDesigner implements IVDoc<CCardDesigner> {
     //========== Constructor
     VCardDesigner() {
         txtStatus.setRows(8); //a wrapped text area otherwise reports a one-line preferred height
+        btnAddArtVariant.setEnabled(false);
         btnSetArt.setEnabled(false);
         btnSetBackArt.setVisible(false);
         btnRevert.setVisible(false);
@@ -72,6 +74,12 @@ public enum VCardDesigner implements IVDoc<CCardDesigner> {
         return btnNewCard;
     }
 
+    /** Adds the picked picture as a new printing of the selected card, stock or custom, in the Workshop Art edition. */
+    public FLabel getBtnAddArtVariant() {
+        return btnAddArtVariant;
+    }
+
+    /** Replaces the selected printing's own picture; a stock printing's downloaded scan is not one. */
     public FLabel getBtnSetArt() {
         return btnSetArt;
     }
@@ -139,6 +147,7 @@ public enum VCardDesigner implements IVDoc<CCardDesigner> {
         body.setLayout(new MigLayout("insets 6, gap 4, wrap 1, fillx, hidemode 3"));
         body.add(txtStatus, "growx, wmin 10"); //wmin: a long path must wrap, not widen the cell
         body.add(btnNewCard, "growx, h 30!");
+        body.add(btnAddArtVariant, "growx, h 30!");
         body.add(btnSetArt, "growx, h 30!");
         body.add(btnSetBackArt, "growx, h 30!");
         body.add(btnRevert, "growx, h 30!");

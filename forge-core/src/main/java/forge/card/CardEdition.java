@@ -263,6 +263,16 @@ public final class CardEdition implements Comparable<CardEdition> {
      */
     public static final String UNKNOWN_CODE = "???";
     public static final String UNKNOWN_SET_NAME = "UNKNOWN";
+    /**
+     * The code of the Workshop Art edition ({@code custom/editions/Workshop Art.txt}): the desktop
+     * Workshop's Add Art Variant files the user's picture of a stock card there as a new printing, so the
+     * card's rules stay stock and it is not a custom card. A printing in it is chosen per deck slot and
+     * never by the art preference: {@link CardDb} leaves the edition out of a set-less lookup whenever
+     * another edition is accepted, and out of the unique-by-name index unless it is the card's only print.
+     * The edition is also dated before Alpha, which alone would not do this (the oldest-date preference
+     * would take it, and the latest-art one walks to the first printing with a picture).
+     */
+    public static final String WORKSHOP_ART_CODE = "WSART";
     public static final CardEdition UNKNOWN = new CardEdition("1990-01-01", UNKNOWN_CODE, "??", Type.UNKNOWN, UNKNOWN_SET_NAME, FoilType.NOT_SUPPORTED);
     private Date date;
     private String code;
@@ -867,6 +877,15 @@ public final class CardEdition implements Comparable<CardEdition> {
             return res;
         }
 
+        /**
+         * Reads one edition file outside a folder scan, typed the way {@link #readAll()} types the
+         * folder it was built for: the Workshop registers an edition it wrote after start-up without
+         * re-reading every file beside it.
+         */
+        public CardEdition readFile(File file) {
+            return read(file);
+        }
+
         @Override
         protected FilenameFilter getFileFilter() {
             return TXT_FILE_FILTER;
@@ -906,6 +925,19 @@ public final class CardEdition implements Comparable<CardEdition> {
             this.add(customBucket);
             initAliases(customBucket);
             this.lock = true; //Consider it initialized and prevent from writing any more data.
+        }
+        /**
+         * Puts a custom edition into the collection after start-up, replacing the one under its code
+         * if there is one: the Workshop writes an edition file at runtime and registers it without a
+         * restart. The lock keeps the stock storage read-only once the custom folder was appended; a
+         * CUSTOM_SET edition is what {@link #append} admitted, so it goes in the same way.
+         */
+        public void addCustomEdition(CardEdition edition) {
+            if (edition.getType() != Type.CUSTOM_SET) {
+                throw new IllegalArgumentException("Only a custom edition can be added after start-up: " + edition.getCode());
+            }
+            map.put(edition.getCode(), edition);
+            initAliases(edition);
         }
 
         //Gets a sets by code.  It will search first by three letter codes, then by aliases and two-letter codes.
