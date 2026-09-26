@@ -89,6 +89,8 @@ public enum VSubmenuPreferences implements IVSubmenu<CSubmenuPreferences> {
     private final JCheckBox cbImageFetcher = new OptionsCheckBox(localizer.getMessage("cbImageFetcher"));
     private final JCheckBox cbPreferLangForUniqueCards = new OptionsCheckBox(localizer.getMessage("cbPreferLangForUniqueCards"));
     private final JCheckBox cbDisableCardImages = new OptionsCheckBox(localizer.getMessage("lblDisableCardImages"));
+    private final JCheckBox cbShareCustomArt = new OptionsCheckBox(localizer.getMessage("cbShareCustomArt"));
+    private final JCheckBox cbShowSharedArt = new OptionsCheckBox(localizer.getMessage("cbShowSharedArt"));
     private final JCheckBox cbCloneImgSource = new OptionsCheckBox(localizer.getMessage("cbCloneImgSource"));
     private final JCheckBox cbScaleLarger = new OptionsCheckBox(localizer.getMessage("cbScaleLarger"));
     private final JCheckBox cbRenderBlackCardBorders = new OptionsCheckBox(localizer.getMessage("cbRenderBlackCardBorders"));
@@ -317,6 +319,12 @@ public enum VSubmenuPreferences implements IVSubmenu<CSubmenuPreferences> {
 
         pnlPrefs.add(getAfkTimeoutPanel(), titleConstraints + ", h 26px!");
         pnlPrefs.add(new NoteLabel(localizer.getMessage("nlAfkTimeout")), descriptionConstraints);
+
+        pnlPrefs.add(cbShareCustomArt, titleConstraints);
+        pnlPrefs.add(new NoteLabel(localizer.getMessage("nlShareCustomArt")), descriptionConstraints);
+
+        pnlPrefs.add(cbShowSharedArt, titleConstraints);
+        pnlPrefs.add(new NoteLabel(localizer.getMessage("nlShowSharedArt")), descriptionConstraints);
 
         // Deck building options
         pnlPrefs.add(new SectionLabel(localizer.getMessage("RandomDeckGeneration")), sectionConstraints);
@@ -802,6 +810,16 @@ public enum VSubmenuPreferences implements IVSubmenu<CSubmenuPreferences> {
     /** @return {@link javax.swing.JCheckBox} */
     public JCheckBox getCbDisableCardImages() {
         return cbDisableCardImages;
+    }
+
+    /** @return {@link javax.swing.JCheckBox} */
+    public JCheckBox getCbShareCustomArt() {
+        return cbShareCustomArt;
+    }
+
+    /** @return {@link javax.swing.JCheckBox} */
+    public JCheckBox getCbShowSharedArt() {
+        return cbShowSharedArt;
     }
 
     /** @return {@link javax.swing.JCheckBox} */
