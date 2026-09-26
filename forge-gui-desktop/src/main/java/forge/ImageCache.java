@@ -79,6 +79,8 @@ import forge.util.TextUtil;
 public class ImageCache {
     // short prefixes to save memory
 
+    /** The smallest side the resampler draws. */
+    private static final int MIN_SCALED_SIDE = 3;
     private static final Set<String> _missingIconKeys = new HashSet<>();
     private static final LoadingCache<String, BufferedImage> _CACHE = CacheBuilder.newBuilder()
             .maximumSize(FModel.getPreferences().getPrefInt(FPref.UI_IMAGE_CACHE_MAXIMUM))
@@ -401,6 +403,9 @@ public class ImageCache {
         } else if (imageKey.endsWith(ImageKeys.SPECFACE_G)) {
             specColor = "green";
         }
+        // Captured before the key is rewritten to a local file key: another player's
+        // custom art is asked for by the card key they sent, face suffix included.
+        final String sharedArtKey = specColor.isEmpty() && imageKey.startsWith(ImageKeys.CARD_PREFIX) ? imageKey : null;
         if (altState)
             imageKey = imageKey.substring(0, imageKey.length() - ImageKeys.BACKFACE_POSTFIX.length());
         if (!specColor.isEmpty())
@@ -433,8 +438,13 @@ public class ImageCache {
             imageKey = TextUtil.fastReplace(imageKey, ".full", ".artcrop");
         }
 
-        // Load from file and add to cache if not found in cache initially.
-        BufferedImage original = getImage(imageKey);
+        // Another player's shared custom art when the viewer opted in; otherwise,
+        // and whenever none has arrived, the local file exactly as before.
+        BufferedImage original = sharedArtKey != null && !useArtCrop ? SharedArtImages.lookup(sharedArtKey) : null;
+        if (original == null) {
+            // Load from file and add to cache if not found in cache initially.
+            original = getImage(imageKey);
+        }
 
         if (original == null && !useDefaultIfNotFound) {
             return Pair.of(null, false);
@@ -548,7 +558,9 @@ public class ImageCache {
         }
 
         final BufferedImage cached = _CACHE.getIfPresent(resizedKey);
-        if (null != cached) {
+        // A cached copy goes once shared art made it stale: another player's picture after SHOW went
+        // off or the session ended, or the local art cached while SHOW was off, once it is back on.
+        if (null != cached && !SharedArtImages.dropIfStale(key)) {
             return cached;
         }
 
@@ -582,11 +594,15 @@ public class ImageCache {
         if (1 == bestFitScale) {
             result = original;
         } else {
-            int destWidth  = (int)(original.getWidth()  * bestFitScale);
-            int destHeight = (int)(original.getHeight() * bestFitScale);
-
-            ResampleOp resampler = new ResampleOp(destWidth, destHeight);
-            result = resampler.filter(original, null);
+            try {
+                result = resize(original, bestFitScale);
+            } catch (final RuntimeException e) {
+                // Another player's shared picture that cannot be drawn gives way to the local art.
+                if (!SharedArtImages.refuse(key)) {
+                    throw e;
+                }
+                return scaleImage(key, width, height, useDefaultImage, cardView);
+            }
         }
 
         if (!isPlaceholder) {
@@ -594,6 +610,39 @@ public class ImageCache {
         }
         return result;
     }
+
+    /**
+     * Drops every scaled copy of a card key, so the next paint resolves it
+     * again. Shared custom art (SharedArtImages) uses it when another player's
+     * picture lands, when it must stop showing, and when it may show again.
+     */
+    static void invalidateScaled(final String key) {
+        final String prefix = key + "#";
+        _CACHE.asMap().keySet().removeIf(k -> k.startsWith(prefix));
+    }
+
+    /**
+     * Scales a picture by a factor. The resampler refuses a side under three
+     * pixels, which a picture far from a card's shape reaches in a small box,
+     * so each side is kept to at least that; and it cannot read a source that
+     * thin either, which is drawn scaled instead.
+     */
+    static BufferedImage resize(final BufferedImage original, final double scale) {
+        final int destWidth = Math.max(MIN_SCALED_SIDE, (int) (original.getWidth() * scale));
+        final int destHeight = Math.max(MIN_SCALED_SIDE, (int) (original.getHeight() * scale));
+        if (original.getWidth() < MIN_SCALED_SIDE || original.getHeight() < MIN_SCALED_SIDE) {
+            final BufferedImage out = new BufferedImage(destWidth, destHeight, BufferedImage.TYPE_INT_ARGB);
+            final Graphics2D g = out.createGraphics();
+            try {
+                g.drawImage(original, 0, 0, destWidth, destHeight, null);
+            } finally {
+                g.dispose();
+            }
+            return out;
+        }
+        return new ResampleOp(destWidth, destHeight).filter(original, null);
+    }
+
     /**
      * Crops the Card Image to get the Card Art of "regular Card frame".
      * @param bufferedImage the image that will be crop

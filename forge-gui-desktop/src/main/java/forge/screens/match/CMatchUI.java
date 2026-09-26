@@ -40,6 +40,7 @@ import com.google.common.collect.Lists;
 
 import forge.ImageCache;
 import forge.LobbyPlayer;
+import forge.SharedArtImages;
 import forge.Singletons;
 import forge.StaticData;
 import forge.game.GameState;
@@ -1239,6 +1240,10 @@ public final class CMatchUI
         }
         initMatch(players, myPlayers);
         clearSelectables(); //fix uncleared selection
+        // Other players' custom art is asked for only while a network match view is open.
+        if (isNetGame()) {
+            FThreads.invokeInEdtNowOrLater(SharedArtImages::beginGame);
+        }
 
         actuateMatchPreferences();
 
@@ -1311,6 +1316,9 @@ public final class CMatchUI
         FThreads.invokeInEdtNowOrLater(() -> {
             Singletons.getView().getNavigationBar().closeTab(screen);
             LinkHandler.clearWeakReferencesNow();
+            if (isNetGame()) {
+                SharedArtImages.endGame(); // a local match closing leaves a network game's pictures alone
+            }
         });
     }
 

@@ -23,11 +23,13 @@ public abstract class CachedCardImage implements ImageFetcher.Callback {
         this.height = height;
         if (ImageCache.isSupportedImageSize(width, height)) {
             BufferedImage image = ImageCache.getImageNoDefault(card, viewers, width, height);
+            String key = card.getCurrentState().getImageKey(viewers);
             if (image == null) {
-                String key = card.getCurrentState().getImageKey(viewers);
                 Logger.debug("Fetch due to missing key: " + key + " for " + card);
                 fetcher.fetchImage(key, this);
             }
+            // A shared custom picture on its way replaces the local one when it lands, as a download would.
+            SharedArtImages.callWhenSettled(key, this);
         }
     }
 
