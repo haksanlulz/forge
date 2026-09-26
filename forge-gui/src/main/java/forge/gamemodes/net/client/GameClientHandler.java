@@ -12,6 +12,7 @@ import forge.gamemodes.net.IRemote;
 import forge.gamemodes.net.ProtocolMethod;
 import forge.gamemodes.net.ReplyPool;
 import forge.gamemodes.net.event.LoginEvent;
+import forge.gamemodes.net.event.NetCapabilities;
 import forge.gamemodes.net.server.RemoteClientGuiGame;
 import forge.gui.interfaces.IGuiGame;
 import forge.util.BuildInfo;
@@ -213,14 +214,20 @@ final class GameClientHandler extends GameProtocolHandler<IGuiGame> implements I
         if (loginName == null || loginName.isEmpty()) {
             loginName = FModel.getPreferences().getPref(FPref.PLAYER_NAME);
         }
-        // Don't use send() here, as this.channel is not yet set!
-        ctx.channel().writeAndFlush(new LoginEvent(
+        final LoginEvent login = new LoginEvent(
                 loginName,
                 Integer.parseInt(FModel.getPreferences().getPref(FPref.UI_AVATARS).split(",")[0]),
                 Integer.parseInt(FModel.getPreferences().getPref(FPref.UI_SLEEVES).split(",")[0]),
                 BuildInfo.getVersionString(),
                 GuiBase.getInterface().isLibgdxPort()
-        ));
+        );
+        // Offered only to a player who opted in either way; with both off the login frame is unchanged.
+        final boolean share = FModel.getPreferences().getPrefBoolean(FPref.UI_NETPLAY_SHARE_CUSTOM_ART);
+        if (share || FModel.getPreferences().getPrefBoolean(FPref.UI_NETPLAY_SHOW_SHARED_ART)) {
+            login.setCapabilities(NetCapabilities.forLogin(share));
+        }
+        // Don't use send() here, as this.channel is not yet set!
+        ctx.channel().writeAndFlush(login);
     }
 
 }

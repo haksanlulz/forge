@@ -1,8 +1,11 @@
 package forge.gamemodes.net;
 
 import com.google.common.io.ByteStreams;
+import forge.gamemodes.net.event.LoginEvent;
+import forge.gamemodes.net.event.NetCapabilities;
 import forge.trackable.Tracker;
 import forge.util.IHasForgeLog;
+import forge.util.LogSafe;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufInputStream;
 import io.netty.channel.ChannelHandlerContext;
@@ -11,6 +14,7 @@ import io.netty.handler.codec.serialization.ClassResolver;
 import net.jpountz.lz4.LZ4BlockInputStream;
 
 import java.io.EOFException;
+import java.io.IOException;
 import java.io.InvalidClassException;
 import java.io.ObjectInputStream;
 import java.io.StreamCorruptedException;
@@ -38,8 +42,16 @@ public class CompatibleObjectDecoder extends LengthFieldBasedFrameDecoder implem
     private static final long MAX_DECOMPRESSED_BYTES =
             Long.getLong("forge.net.maxDecompressedBytes", 64L * 1024 * 1024);
 
+    /**
+     * Refused frames logged at ERROR per connection. A refused frame can be a
+     * few bytes long, so past this the log notes only every doubling.
+     */
+    private static final int REFUSED_FRAMES_LOGGED = 16;
+
     private final ClassResolver classResolver;
     private volatile Tracker tracker;
+    /** Frames refused on this connection; touched only by its event loop. */
+    private int refusedFrames;
 
     public CompatibleObjectDecoder(int maxObjectSize, ClassResolver classResolver) {
         // LengthFieldBasedFrameDecoder: maxFrameLength, lengthFieldOffset=0,
@@ -69,13 +81,20 @@ public class CompatibleObjectDecoder extends LengthFieldBasedFrameDecoder implem
         Object result = null;
         try {
             result = objectIn.readObject();
+            if (result instanceof LoginEvent login) {
+                login.setCapabilities(readLoginTrailer(objectIn));
+            }
         } catch (StreamCorruptedException e) {
             netLog.error("Version Mismatch: {}", e.getMessage());
         } catch (InvalidClassException e) {
             // A peer named a class the protocol does not carry, or asked for
             // more of one than WireStreamLimits allows. Drop the frame rather
             // than tearing the pipeline down, matching a corrupt frame.
-            netLog.error("Dropping refused frame: {}", e.getMessage());
+            if (++refusedFrames <= REFUSED_FRAMES_LOGGED) {
+                netLog.error("Dropping refused frame: {}", e.getMessage());
+            } else if (Integer.bitCount(refusedFrames) == 1) {
+                netLog.error("Dropped {} refused frames from this peer; noting only every doubling", refusedFrames);
+            }
         } catch (EOFException e) {
             // Truncated, or past the decompressed-byte ceiling: the bounded
             // stream reports the cap as end-of-input rather than throwing.
@@ -93,6 +112,23 @@ public class CompatibleObjectDecoder extends LengthFieldBasedFrameDecoder implem
         }
 
         return result;
+    }
+
+    /**
+     * A login may carry a trailing {@link NetCapabilities}; one from an older
+     * client ends after the event. Never fatal: a missing, unknown or refused
+     * trailer leaves the login intact.
+     */
+    private static NetCapabilities readLoginTrailer(final ObjectInputStream in) {
+        try {
+            final Object trailer = in.readObject();
+            return trailer instanceof NetCapabilities caps ? caps : null;
+        } catch (final EOFException absent) {
+            return null;
+        } catch (final IOException | ClassNotFoundException | RuntimeException unreadable) {
+            netLog.warn("Ignoring unreadable login capabilities: {}", LogSafe.forLog(unreadable.toString()));
+            return null;
+        }
     }
 
 }

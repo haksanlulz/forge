@@ -30,6 +30,11 @@ public class WireClassFilterTest {
             "[Ljava.util.concurrent.ConcurrentHashMap$Segment;",
             // The filter's one deliberate soft spot: getChoices ships a lambda.
             "java.lang.invoke.SerializedLambda",
+            // Shared custom art: the events, and the capability tokens' array.
+            "forge.gamemodes.net.event.NetCapabilities",
+            "forge.gamemodes.net.event.ArtRequestEvent",
+            "forge.gamemodes.net.event.ArtReplyEvent",
+            "[Ljava.lang.String;",
     };
 
     private static final String[] REJECTED = {

@@ -21,6 +21,7 @@ import forge.gamemodes.net.NetworkLogConfig;
 import forge.gamemodes.net.draft.BoosterDraftHost;
 import forge.util.IHasForgeLog;
 import forge.gamemodes.net.event.*;
+import forge.gamemodes.net.sharedart.SharedArtSession;
 import forge.gui.GuiBase;
 import forge.gui.interfaces.IDraftEventHandler;
 import forge.gui.interfaces.IGuiGame;
@@ -81,6 +82,7 @@ public final class FServerManager implements IHasForgeLog, HostingServer.Server 
     private final Map<Channel, RemoteClient> clients = new ConcurrentHashMap<>();
     private final Map<String, RemoteClient> disconnectedClients = new ConcurrentHashMap<>();
     private final Map<String, Timer> reconnectTimers = new ConcurrentHashMap<>();
+    private final SharedArtRelay sharedArt = new SharedArtRelay(this);
 
     // Abuse limits. Read per call rather than into constants so a test can vary
     // them: Integer.getInteger in a static initialiser fixes the value at
@@ -257,6 +259,7 @@ public final class FServerManager implements IHasForgeLog, HostingServer.Server 
                                     new SaturationLoggingHandler(),
                                     new RegisterClientHandler(),
                                     new DeregisterClientHandler(),
+                                    new SharedArtHandler(),
                                     new GameServerHandler());
                         }
                     });
@@ -277,6 +280,7 @@ public final class FServerManager implements IHasForgeLog, HostingServer.Server 
             }
             Runtime.getRuntime().addShutdownHook(shutdownHook);
             HostingServer.set(this);
+            SharedArtSession.setActive(sharedArt.hostSession());
         } catch (final InterruptedException e) {
             netLog.error(e, "Server start interrupted");
         }
@@ -321,6 +325,8 @@ public final class FServerManager implements IHasForgeLog, HostingServer.Server 
         disconnectedClients.clear();
         clients.clear();
         afkSlots.clear();
+        sharedArt.reset();
+        SharedArtSession.clearActive(sharedArt.hostSession());
 
         try {
             if (bossGroup != null) {
@@ -481,6 +487,10 @@ public final class FServerManager implements IHasForgeLog, HostingServer.Server 
 
     public void setLobby(final ServerGameLobby lobby) {
         this.localLobby = lobby;
+    }
+
+    ServerGameLobby getLocalLobby() {
+        return localLobby;
     }
 
     public void unsetReady() {
@@ -1092,6 +1102,7 @@ public final class FServerManager implements IHasForgeLog, HostingServer.Server 
 
                     // Re-register under the new channel
                     clients.put(ctx.channel(), disconnected);
+                    SharedArtRelay.acceptCapabilities(disconnected, event);
                     netLog.info("[Reconnect] Channel swapped for {} (slot {})", username, disconnected.getIndex());
 
                     // Resume and resync
@@ -1131,6 +1142,7 @@ public final class FServerManager implements IHasForgeLog, HostingServer.Server 
                     } else {
                         client.setIndex(index);
                         client.setLibgdx(event.isLibgdx());
+                        SharedArtRelay.acceptCapabilities(client, event);
                         if (index > 0) {
                             broadcast(new MessageEvent(String.format("%s joined the lobby.", username)));
                             broadcastTo(new MessageEvent(formatAfkTimeoutMessage()),
@@ -1221,6 +1233,11 @@ public final class FServerManager implements IHasForgeLog, HostingServer.Server 
                 super.channelInactive(ctx);
                 return;
             }
+            try {
+                sharedArt.onClientGone(client);
+            } catch (final RuntimeException e) {
+                netLog.debug("Shared art cleanup for slot {} failed: {}", client.getIndex(), LogSafe.forLog(e.toString()));
+            }
 
             // Cancel any pending replies immediately to unblock game thread
             netLog.info("[Disconnect] Canceling pending replies for disconnected client");
@@ -1284,6 +1301,30 @@ public final class FServerManager implements IHasForgeLog, HostingServer.Server 
                     ctx.channel().remoteAddress());
             }
             super.channelInactive(ctx);
+        }
+    }
+
+    /** Shared custom art. Swallows every failure: anything reaching exceptionCaught closes the channel. */
+    private class SharedArtHandler extends ChannelInboundHandlerAdapter {
+        @Override
+        public void channelRead(final ChannelHandlerContext ctx, final Object msg) throws Exception {
+            if (!(msg instanceof ArtRequestEvent) && !(msg instanceof ArtReplyEvent)) {
+                super.channelRead(ctx, msg);
+                return;
+            }
+            final RemoteClient client = clients.get(ctx.channel());
+            if (client == null || !client.hasValidSlot() || !client.supportsSharedArt()) {
+                return; // only a peer that announced the capability may use it
+            }
+            try {
+                if (msg instanceof ArtRequestEvent request) {
+                    sharedArt.onRequest(client, request);
+                } else {
+                    sharedArt.onOwnerReply(client, (ArtReplyEvent) msg);
+                }
+            } catch (final RuntimeException e) {
+                netLog.debug("Shared art frame from slot {} ignored: {}", client.getIndex(), LogSafe.forLog(e.toString()));
+            }
         }
     }
 }

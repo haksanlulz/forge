@@ -7,6 +7,11 @@ public class LoginEvent implements NetEvent {
     private final int avatarIndex, sleeveIndex;
     private final String version;
     private final boolean libgdx;
+    /**
+     * Not serialized: older peers read this class with their own field layout,
+     * so its fields must not change. The codec carries it as a trailing object.
+     */
+    private transient NetCapabilities capabilities;
     public LoginEvent(final String username, final int avatarIndex, final int sleeveIndex, final String version, final boolean libgdx) {
         this.username = username;
         this.avatarIndex = avatarIndex;
@@ -33,5 +38,13 @@ public class LoginEvent implements NetEvent {
 
     public boolean isLibgdx() {
         return libgdx;
+    }
+
+    public NetCapabilities getCapabilities() {
+        return capabilities;
+    }
+
+    public void setCapabilities(final NetCapabilities capabilities) {
+        this.capabilities = capabilities;
     }
 }

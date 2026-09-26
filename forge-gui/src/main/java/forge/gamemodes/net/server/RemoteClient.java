@@ -22,6 +22,8 @@ public final class RemoteClient implements IToClient, IHasForgeLog {
     private String username;
     private int index = UNASSIGNED_SLOT;
     private boolean libgdx;
+    private volatile boolean sharedArt;
+    private volatile boolean servesSharedArt;
     private volatile ReplyPool replies = new ReplyPool();
     private volatile Tracker codecTracker;
     private volatile int codecConsumerId = -1;
@@ -170,6 +172,28 @@ public final class RemoteClient implements IToClient, IHasForgeLog {
     }
     public void setLibgdx(final boolean libgdx) {
         this.libgdx = libgdx;
+    }
+
+    /** Whether this peer announced NetCapabilities.SHARED_ART at login; only such peers are sent shared-art events. */
+    public boolean supportsSharedArt() {
+        return sharedArt;
+    }
+    public void setSharedArt(final boolean sharedArt) {
+        this.sharedArt = sharedArt;
+    }
+
+    /** Whether this peer also announced NetCapabilities.SHARED_ART_SERVE; only such peers are asked for pictures. */
+    public boolean servesSharedArt() {
+        return servesSharedArt;
+    }
+    public void setServesSharedArt(final boolean serves) {
+        this.servesSharedArt = serves;
+    }
+
+    /** False once the channel is gone or past its outbound high-water mark. */
+    boolean isWritable() {
+        final Channel ch = channel;
+        return ch != null && ch.isActive() && ch.isWritable();
     }
 
     public RemoteClientGuiGame getGui() {

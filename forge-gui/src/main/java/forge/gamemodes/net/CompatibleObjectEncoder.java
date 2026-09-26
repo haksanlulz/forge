@@ -1,6 +1,7 @@
 package forge.gamemodes.net;
 
 import forge.gamemodes.net.event.GuiGameEvent;
+import forge.gamemodes.net.event.LoginEvent;
 import forge.trackable.Tracker;
 import forge.util.IHasForgeLog;
 import io.netty.buffer.ByteBuf;
@@ -76,6 +77,11 @@ public class CompatibleObjectEncoder extends MessageToByteEncoder<Serializable> 
             byteOut.write(LENGTH_PLACEHOLDER);
             objectOut = new CObjectOutputStream(new LZ4BlockOutputStream(byteOut), replace, tracker, consumerId, false);
             objectOut.writeObject(msg);
+            if (msg instanceof LoginEvent login && login.getCapabilities() != null) {
+                // A trailing object: every decoder before this one reads a single
+                // object per frame, so an older host never resolves its class.
+                objectOut.writeObject(login.getCapabilities());
+            }
             objectOut.flush();
         } finally {
             if (objectOut != null) {

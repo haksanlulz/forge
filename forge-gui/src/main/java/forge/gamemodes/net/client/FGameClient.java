@@ -8,9 +8,21 @@ import forge.gamemodes.net.NetworkLogConfig;
 import forge.util.IHasForgeLog;
 import forge.gamemodes.net.ReplyPool;
 import forge.gamemodes.net.event.*;
+import forge.deck.CardPool;
+import forge.deck.Deck;
+import forge.deck.DeckSection;
+import forge.gamemodes.match.GameLobby.GameLobbyData;
+import forge.gamemodes.match.LobbySlot;
+import forge.gamemodes.net.sharedart.SharedArtOwner;
+import forge.gamemodes.net.sharedart.SharedArtPolicy;
+import forge.gamemodes.net.sharedart.SharedArtSession;
+import forge.gamemodes.net.sharedart.SharedArtSource;
 import forge.gui.interfaces.IDraftEventHandler;
 import forge.gui.interfaces.IGuiGame;
 import forge.interfaces.ILobbyListener;
+import forge.localinstance.properties.ForgePreferences.FPref;
+import forge.model.FModel;
+import forge.util.LogSafe;
 import io.netty.bootstrap.Bootstrap;
 import io.netty.buffer.ByteBuf;
 import io.netty.channel.*;
@@ -24,7 +36,11 @@ import io.netty.handler.timeout.IdleState;
 import io.netty.handler.timeout.IdleStateEvent;
 import io.netty.handler.timeout.IdleStateHandler;
 
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
@@ -62,6 +78,36 @@ public class FGameClient implements IToServer, IHasForgeLog {
     private final List<ILobbyListener> lobbyListeners = Lists.newArrayList();
     private IDraftEventHandler draftHandler;
     private final ReplyPool replies = new ReplyPool();
+    private final SharedArtSession sharedArt = new SharedArtSession(this::send,
+            () -> FModel.getPreferences().getPrefBoolean(FPref.UI_NETPLAY_SHOW_SHARED_ART));
+    private final SharedArtOwner sharedArtOwner = new SharedArtOwner(
+            SharedArtOwner.readerThread(),
+            () -> FModel.getPreferences().getPrefBoolean(FPref.UI_NETPLAY_SHARE_CUSTOM_ART),
+            key -> SharedArtSource.serve(key, this::brought),
+            new SharedArtOwner.Link() {
+                @Override
+                public boolean isWritable() {
+                    final Channel ch = channel;
+                    return !disconnectSimulated && ch != null && ch.isActive() && ch.isWritable();
+                }
+
+                @Override
+                public void send(final ArtReplyEvent reply) {
+                    FGameClient.this.send(reply);
+                }
+            },
+            sharedArt::generation);
+    /**
+     * The cards of the deck this player itself last sent the host, by
+     * section: a new deck replaces them all, a section update replaces that
+     * section, as the host applies them. Kept here rather than read back from
+     * the lobby state, which the host writes, so a host cannot widen what this
+     * player shares, and a deck swapped out stops being shared.
+     */
+    private final Map<DeckSection, Set<String>> broughtCards = new ConcurrentHashMap<>();
+    private volatile boolean deckBrought;
+    /** The lobby state as last received, whose decks every player sees: what is asked for at match start. */
+    private volatile GameLobbyData lobbyState;
     private volatile boolean disconnectSimulated;
     private volatile Channel channel;
 
@@ -81,6 +127,7 @@ public class FGameClient implements IToServer, IHasForgeLog {
         this.clientGui = clientGui;
         this.hostname = hostname;
         this.port = port;
+        sharedArt.setLobbyDecks(this::lobbyDecks);
     }
 
     public String getUsername() {
@@ -92,6 +139,25 @@ public class FGameClient implements IToServer, IHasForgeLog {
     }
     final ReplyPool getReplyPool() {
         return replies;
+    }
+
+    /** This connection's asking side of shared custom art. */
+    public SharedArtSession getSharedArt() {
+        return sharedArt;
+    }
+
+    /** The decks of every seat in the lobby state last received. */
+    private List<Deck> lobbyDecks() {
+        final GameLobbyData state = lobbyState;
+        final List<Deck> decks = new ArrayList<>();
+        if (state != null) {
+            for (final LobbySlot slot : state.getSlots()) {
+                if (slot != null && slot.getDeck() != null) {
+                    decks.add(slot.getDeck());
+                }
+            }
+        }
+        return decks;
     }
 
     public void connect() {
@@ -111,6 +177,7 @@ public class FGameClient implements IToServer, IHasForgeLog {
                             new CompatibleObjectDecoder(9766*1024, ClassResolvers.cacheDisabled(null)),
                             new IdleStateHandler(READER_IDLE_SECONDS, HEARTBEAT_INTERVAL_SECONDS, 0, TimeUnit.SECONDS),
                             new MessageHandler(),
+                            new SharedArtHandler(),
                             new LobbyUpdateHandler(),
                             new GameClientHandler(FGameClient.this));
                 }
@@ -153,6 +220,8 @@ public class FGameClient implements IToServer, IHasForgeLog {
 
     public void close() {
         beginShutdown();
+        SharedArtSession.clearActive(sharedArt);
+        sharedArt.endGame();
         if (channel != null)
             channel.close();
         reconnectScheduler.shutdownNow();
@@ -161,7 +230,46 @@ public class FGameClient implements IToServer, IHasForgeLog {
 
     @Override
     public void send(final NetEvent event) {
+        if (event instanceof UpdateLobbyPlayerEvent update) {
+            noteBrought(update);
+        }
         trySend(event);
+    }
+
+    private void noteBrought(final UpdateLobbyPlayerEvent update) {
+        if (update.getDeck() != null) {
+            broughtCards.clear(); // a new deck replaces the old one entirely
+            for (final Map.Entry<DeckSection, CardPool> section : update.getDeck()) {
+                final Set<String> ids = ConcurrentHashMap.newKeySet();
+                SharedArtSource.addArtIds(section.getValue(), ids);
+                broughtCards.put(section.getKey(), ids);
+            }
+            deckBrought = true;
+        } else if (deckBrought && update.getSection() != null && update.getCards() != null) {
+            // As LobbySlot applies it: the section's cards replace what it held, once a deck exists.
+            final Set<String> ids = ConcurrentHashMap.newKeySet();
+            SharedArtSource.addArtIds(update.getCards(), ids);
+            broughtCards.put(update.getSection(), ids);
+        }
+    }
+
+    /**
+     * Whether a key names a picture of a card in the deck this player last
+     * brought, at that card's own art index: the only pictures it shares.
+     * The slot deck the host routes by only ever comes from this player's own
+     * UpdateLobbyPlayerEvent, which is what this records.
+     */
+    private boolean brought(final String key) {
+        final String id = SharedArtPolicy.artIdOf(key);
+        if (id == null) {
+            return false;
+        }
+        for (final Set<String> ids : broughtCards.values()) {
+            if (ids.contains(id)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -307,6 +415,10 @@ public class FGameClient implements IToServer, IHasForgeLog {
             }
             reconnectState = ReconnectState.RECONNECTING;
         }
+        // Nothing is asked until the host answers the reconnect's login again, which it
+        // does only if that login still announces the capability. Pictures already
+        // shown stay: the same game resumes.
+        sharedArt.setPeerCapable(false);
         if (channel != null && channel.isOpen()) {
             channel.close();
         }
@@ -468,6 +580,38 @@ public class FGameClient implements IToServer, IHasForgeLog {
         }
     }
 
+    /** Shared custom art. Swallows every failure: anything reaching exceptionCaught closes the channel. */
+    private class SharedArtHandler extends ChannelInboundHandlerAdapter {
+        @Override
+        public void channelRead(final ChannelHandlerContext ctx, final Object msg) throws Exception {
+            try {
+                if (msg instanceof NetCapabilities caps) {
+                    // The host answers only a login that announced, so this is the handshake's second half.
+                    sharedArt.setPeerCapable(caps.has(NetCapabilities.SHARED_ART));
+                    if (sharedArt.isPeerCapable()) {
+                        SharedArtSession.setActive(sharedArt);
+                    }
+                    return;
+                }
+                if (msg instanceof ArtReplyEvent reply) {
+                    sharedArt.onReply(reply);
+                    return;
+                }
+                if (msg instanceof ArtRequestEvent request) {
+                    // The host asks on another player's behalf, under this end's own limits.
+                    if (sharedArt.isPeerCapable()) {
+                        sharedArtOwner.offer(request);
+                    }
+                    return;
+                }
+            } catch (final RuntimeException e) {
+                netLog.debug("Shared art frame ignored: {}", LogSafe.forLog(e.toString()));
+                return;
+            }
+            super.channelRead(ctx, msg);
+        }
+    }
+
     private class LobbyUpdateHandler extends ChannelInboundHandlerAdapter {
         @Override
         public void channelRead(final ChannelHandlerContext ctx, final Object msg) throws Exception {
@@ -478,6 +622,7 @@ public class FGameClient implements IToServer, IHasForgeLog {
                 return;
             }
             if (msg instanceof LobbyUpdateEvent event) {
+                lobbyState = event.getState(); // even while reconnecting: shared art asks from the decks it holds
                 // Suppress lobby UI updates while reconnecting so the lobby screen doesn't flash
                 // back over the in-game UI; the resume payload (setGameView) is what tells us
                 // we're back in the match. Seat-lost is signaled explicitly via SeatLostEvent.

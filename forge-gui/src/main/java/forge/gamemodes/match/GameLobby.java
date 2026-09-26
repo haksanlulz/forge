@@ -585,6 +585,11 @@ public abstract class GameLobby implements IHasGameType {
         public GameLobbyData() {
         }
 
+        /** The seats, in index order, each with the deck every player in the lobby receives. */
+        public List<LobbySlot> getSlots() {
+            return Collections.unmodifiableList(slots);
+        }
+
         public NetworkEventView getEventView() {
             return eventView;
         }
